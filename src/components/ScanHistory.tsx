@@ -39,7 +39,7 @@ export function ScanHistory({ records, onRefresh }: ScanHistoryProps) {
           </div>
           <div className="flex gap-1">
             <button
-              onClick={() => exportToExcel(record.data as any, record.type)}
+              onClick={() => exportToExcel(record.data, record.type)}
               className="p-2 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors"
               title="Re-download"
             >

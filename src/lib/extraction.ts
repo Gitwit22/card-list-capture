@@ -1,12 +1,24 @@
 import { DocumentType, SignupEntry, BusinessCardEntry } from '@/types/scan';
 
-// Simulated AI extraction - in production this would call an AI vision API
+const MAX_IMAGE_SIZE_MB = 20;
+
+/**
+ * Stub extraction — returns empty entries for manual data entry.
+ * Replace this with an AI vision API (e.g. OpenAI Vision, Google Cloud Vision)
+ * to enable real OCR extraction.
+ */
 export async function extractFromImage(
   imageFile: File,
   docType: DocumentType
 ): Promise<SignupEntry[] | BusinessCardEntry[]> {
+  if (imageFile.size > MAX_IMAGE_SIZE_MB * 1024 * 1024) {
+    throw new Error(`Image exceeds ${MAX_IMAGE_SIZE_MB} MB limit.`);
+  }
+
+  console.warn('[Scan2Sheet] extractFromImage is a stub — no OCR is performed. Returning empty entries for manual entry.');
+
   // Simulate processing delay
-  await new Promise(resolve => setTimeout(resolve, 2000));
+  await new Promise(resolve => setTimeout(resolve, 1500));
 
   if (docType === 'business-card') {
     return [createEmptyBusinessCard()];

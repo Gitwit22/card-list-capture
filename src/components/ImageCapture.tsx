@@ -1,6 +1,9 @@
 import { useState, useCallback } from 'react';
 import { Camera, Upload, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { toast } from 'sonner';
+
+const MAX_FILE_SIZE_MB = 20;
 
 interface ImageCaptureProps {
   onImageSelected: (file: File, previewUrl: string) => void;
@@ -11,7 +14,14 @@ export function ImageCapture({ onImageSelected }: ImageCaptureProps) {
   const [dragOver, setDragOver] = useState(false);
 
   const handleFile = useCallback((file: File) => {
-    if (!file.type.startsWith('image/')) return;
+    if (!file.type.startsWith('image/')) {
+      toast.error('Please select an image file.');
+      return;
+    }
+    if (file.size > MAX_FILE_SIZE_MB * 1024 * 1024) {
+      toast.error(`Image exceeds ${MAX_FILE_SIZE_MB} MB limit.`);
+      return;
+    }
     const url = URL.createObjectURL(file);
     setPreview(url);
     onImageSelected(file, url);

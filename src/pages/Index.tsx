@@ -59,7 +59,7 @@ const Index = () => {
       id: crypto.randomUUID(),
       type: docType,
       imageUrl,
-      data: data as any,
+      data,
       createdAt: new Date(),
     };
     saveScanRecord(record);

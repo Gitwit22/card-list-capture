@@ -79,7 +79,7 @@ export function DataReview({ docType, data, onChange }: DataReviewProps) {
                 <div key={f.key}>
                   <label className="text-xs font-medium text-muted-foreground mb-1 block">{f.label}</label>
                   <Input
-                    value={(entry as any)[f.key] || ''}
+                    value={(entry as Record<string, string>)[f.key] || ''}
                     onChange={e => updateField(index, f.key, e.target.value)}
                     placeholder={f.label}
                     className="h-9 text-sm"
