@@ -39,6 +39,31 @@ interface ExtractionResponse {
   fields: ExtractionField[];
 }
 
+interface SigninProcessResponse {
+  status: string;
+  rows: Array<{
+    fullName?: string;
+    phone?: string;
+    email?: string;
+    date?: string;
+    comments?: string;
+  }>;
+}
+
+interface BusinessCardProcessResponse {
+  status: string;
+  card?: {
+    firstName?: string;
+    lastName?: string;
+    company?: string;
+    title?: string;
+    phone?: string;
+    email?: string;
+    website?: string;
+    address?: string;
+  };
+}
+
 export async function extractFromImage(
   imageFile: File,
   docType: DocumentType
@@ -59,6 +84,49 @@ export async function extractFromImage(
   const formData = new FormData();
   formData.append('file', imageFile);
   formData.append('schema', JSON.stringify(schema));
+
+  const processPath = docType === 'business-card'
+    ? '/process/business-card'
+    : '/process/signin-sheet';
+
+  // Prefer specialized workflow endpoints first, then fallback to generic extract.
+  const processRes = await fetch(`${DOC_INTEL_URL}${processPath}`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${DOC_INTEL_TOKEN}` },
+    body: formData,
+  });
+
+  if (processRes.ok) {
+    if (docType === 'business-card') {
+      const result: BusinessCardProcessResponse = await processRes.json();
+      const card = result.card ?? {};
+      return [
+        {
+          id: crypto.randomUUID(),
+          firstName: card.firstName ?? '',
+          lastName: card.lastName ?? '',
+          company: card.company ?? '',
+          title: card.title ?? '',
+          phone: card.phone ?? '',
+          email: card.email ?? '',
+          website: card.website ?? '',
+          address: card.address ?? '',
+        },
+      ];
+    }
+
+    const result: SigninProcessResponse = await processRes.json();
+    if (Array.isArray(result.rows) && result.rows.length > 0) {
+      return result.rows.map((row) => ({
+        id: crypto.randomUUID(),
+        fullName: row.fullName ?? '',
+        phone: row.phone ?? '',
+        email: row.email ?? '',
+        date: row.date ?? '',
+        comments: row.comments ?? '',
+      }));
+    }
+  }
 
   const res = await fetch(`${DOC_INTEL_URL}/extract`, {
     method: 'POST',

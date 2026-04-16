@@ -3,11 +3,15 @@ import { toast } from 'sonner';
 
 const STORAGE_KEY = 'scan2sheet_history';
 
+type StoredScanRecord = Omit<ScanRecord, 'createdAt'> & { createdAt: string };
+
 export function getScanHistory(): ScanRecord[] {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return [];
-    return JSON.parse(raw).map((r: any) => ({
+    const parsed = JSON.parse(raw) as StoredScanRecord[];
+    if (!Array.isArray(parsed)) return [];
+    return parsed.map((r) => ({
       ...r,
       createdAt: new Date(r.createdAt),
     }));

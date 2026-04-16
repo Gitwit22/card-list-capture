@@ -20,13 +20,13 @@ const Index = () => {
   const [data, setData] = useState<(SignupEntry | BusinessCardEntry)[]>([]);
   const [history, setHistory] = useState<ScanRecord[]>([]);
 
-  useEffect(() => {
-    setHistory(getScanHistory());
-  }, []);
-
   const refreshHistory = useCallback(() => {
     setHistory(getScanHistory());
   }, []);
+
+  useEffect(() => {
+    setHistory(getScanHistory());
+  }, [refreshHistory]);
 
   const selectType = (type: DocumentType) => {
     setDocType(type);
@@ -62,7 +62,9 @@ const Index = () => {
       data,
       createdAt: new Date(),
     };
+
     saveScanRecord(record);
+
     exportToExcel(data, docType);
     refreshHistory();
     toast.success('Exported to Excel!');
