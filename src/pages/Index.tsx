@@ -4,7 +4,7 @@ import { Button } from '@/components/ui/button';
 import { ImageCapture } from '@/components/ImageCapture';
 import { DataReview } from '@/components/DataReview';
 import { ScanHistory } from '@/components/ScanHistory';
-import { DocumentType, SignupEntry, BusinessCardEntry, ScanRecord } from '@/types/scan';
+import { DocumentType, SignupEntry, BusinessCardEntry, ScanRecord, ExtractedData } from '@/types/scan';
 import { extractFromImage } from '@/lib/extraction';
 import { exportToExcel } from '@/lib/export';
 import { getScanHistory, saveScanRecord } from '@/lib/storage';
@@ -55,17 +55,21 @@ const Index = () => {
       return;
     }
 
+    const typedData: ExtractedData = docType === 'business-card'
+      ? (data as BusinessCardEntry[])
+      : (data as SignupEntry[]);
+
     const record: ScanRecord = {
       id: crypto.randomUUID(),
       type: docType,
       imageUrl,
-      data,
+      data: typedData,
       createdAt: new Date(),
     };
 
     saveScanRecord(record);
 
-    exportToExcel(data, docType);
+    exportToExcel(typedData, docType);
     refreshHistory();
     toast.success('Exported to Excel!');
     reset();
