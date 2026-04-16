@@ -15,8 +15,8 @@ type Step = 'home' | 'capture' | 'processing' | 'review' | 'history';
 const Index = () => {
   const [step, setStep] = useState<Step>('home');
   const [docType, setDocType] = useState<DocumentType>('business-card');
-  const [imageFile, setImageFile] = useState<File | null>(null);
-  const [imageUrl, setImageUrl] = useState<string>('');
+  const [capturedFile, setCapturedFile] = useState<File | null>(null);
+  const [filePreviewUrl, setFilePreviewUrl] = useState<string>('');
   const [data, setData] = useState<(SignupEntry | BusinessCardEntry)[]>([]);
   const [history, setHistory] = useState<ScanRecord[]>([]);
 
@@ -34,8 +34,8 @@ const Index = () => {
   };
 
   const handleImageSelected = async (file: File, previewUrl: string) => {
-    setImageFile(file);
-    setImageUrl(previewUrl);
+    setCapturedFile(file);
+    setFilePreviewUrl(previewUrl);
     setStep('processing');
 
     try {
@@ -62,7 +62,7 @@ const Index = () => {
     const record: ScanRecord = {
       id: crypto.randomUUID(),
       type: docType,
-      imageUrl,
+      imageUrl: filePreviewUrl,
       data: typedData,
       createdAt: new Date(),
     };
@@ -77,8 +77,8 @@ const Index = () => {
 
   const reset = () => {
     setStep('home');
-    setImageFile(null);
-    setImageUrl('');
+    setCapturedFile(null);
+    setFilePreviewUrl('');
     setData([]);
   };
 
@@ -165,7 +165,7 @@ const Index = () => {
                 {docType === 'signup-sheet' ? 'Scan Sign-Up Sheet' : 'Scan Business Card'}
               </h2>
               <p className="text-sm text-muted-foreground mt-1">
-                Take a photo or upload an image of the document.
+                Take a photo or upload a file (image, PDF, Excel, Word, etc.).
               </p>
             </div>
             <ImageCapture onImageSelected={handleImageSelected} />
@@ -195,9 +195,9 @@ const Index = () => {
               </p>
             </div>
 
-            {imageUrl && (
+            {filePreviewUrl && (
               <div className="rounded-lg overflow-hidden border border-border">
-                <img src={imageUrl} alt="Scanned document" className="w-full max-h-48 object-contain bg-secondary" />
+                <img src={filePreviewUrl} alt="Scanned document" className="w-full max-h-48 object-contain bg-secondary" />
               </div>
             )}
 

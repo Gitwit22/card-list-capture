@@ -1,6 +1,5 @@
 import { DocumentType, SignupEntry, BusinessCardEntry } from '@/types/scan';
-
-const MAX_IMAGE_SIZE_MB = 20;
+import { getConfig } from '@/config/env';
 
 const DOC_INTEL_URL = import.meta.env.VITE_DOC_INTEL_URL as string;
 const DOC_INTEL_TOKEN = import.meta.env.VITE_DOC_INTEL_TOKEN as string;
@@ -65,11 +64,12 @@ interface BusinessCardProcessResponse {
 }
 
 export async function extractFromImage(
-  imageFile: File,
+  file: File,
   docType: DocumentType
 ): Promise<SignupEntry[] | BusinessCardEntry[]> {
-  if (imageFile.size > MAX_IMAGE_SIZE_MB * 1024 * 1024) {
-    throw new Error(`Image exceeds ${MAX_IMAGE_SIZE_MB} MB limit.`);
+  const maxSizeMb = getConfig().cardCapture.maxFileSizeMb;
+  if (file.size > maxSizeMb * 1024 * 1024) {
+    throw new Error(`File exceeds ${maxSizeMb} MB limit.`);
   }
 
   if (!DOC_INTEL_URL || !DOC_INTEL_TOKEN) {
@@ -82,7 +82,7 @@ export async function extractFromImage(
   const schema = docType === 'business-card' ? BUSINESS_CARD_SCHEMA : SIGNUP_SCHEMA;
 
   const formData = new FormData();
-  formData.append('file', imageFile);
+  formData.append('file', file);
   formData.append('schema', JSON.stringify(schema));
 
   const processPath = docType === 'business-card'
