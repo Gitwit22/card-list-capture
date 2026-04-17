@@ -4,7 +4,7 @@ import { Button } from '@/components/ui/button';
 import { ImageCapture } from '@/components/ImageCapture';
 import { DataReview } from '@/components/DataReview';
 import { ScanHistory } from '@/components/ScanHistory';
-import { DocumentType, SignupEntry, BusinessCardEntry, ScanRecord, ExtractedData } from '@/types/scan';
+import { DocumentType, SignupEntry, BusinessCardEntry, ScanRecord, ExtractedData, ExtractionMeta } from '@/types/scan';
 import { extractFromImage } from '@/lib/extraction';
 import { exportToExcel } from '@/lib/export';
 import { getScanHistory, saveScanRecord } from '@/lib/storage';
@@ -18,6 +18,7 @@ const Index = () => {
   const [capturedFile, setCapturedFile] = useState<File | null>(null);
   const [filePreviewUrl, setFilePreviewUrl] = useState<string>('');
   const [data, setData] = useState<(SignupEntry | BusinessCardEntry)[]>([]);
+  const [extractionMeta, setExtractionMeta] = useState<ExtractionMeta | undefined>();
   const [history, setHistory] = useState<ScanRecord[]>([]);
 
   const refreshHistory = useCallback(() => {
@@ -39,10 +40,11 @@ const Index = () => {
     setStep('processing');
 
     try {
-      const extracted = await extractFromImage(file, docType);
-      setData(extracted);
+      const result = await extractFromImage(file, docType);
+      setData(result.entries);
+      setExtractionMeta(result.meta);
       setStep('review');
-      toast.info('Data extracted — please review and correct any errors before exporting.');
+      toast.info(`Data extracted (${result.entries.length} ${result.entries.length === 1 ? 'entry' : 'entries'}) — please review before exporting.`);
     } catch {
       toast.error('Failed to extract data. Please try again.');
       setStep('capture');
@@ -64,6 +66,7 @@ const Index = () => {
       type: docType,
       imageUrl: filePreviewUrl,
       data: typedData,
+      meta: extractionMeta,
       createdAt: new Date(),
     };
 
@@ -80,6 +83,7 @@ const Index = () => {
     setCapturedFile(null);
     setFilePreviewUrl('');
     setData([]);
+    setExtractionMeta(undefined);
   };
 
   return (
@@ -201,7 +205,7 @@ const Index = () => {
               </div>
             )}
 
-            <DataReview docType={docType} data={data} onChange={setData} />
+            <DataReview docType={docType} data={data} onChange={setData} meta={extractionMeta} />
 
             <Button onClick={handleExport} className="w-full scan-gradient scan-shadow h-12 text-primary-foreground font-medium">
               <Download className="w-5 h-5 mr-2" />

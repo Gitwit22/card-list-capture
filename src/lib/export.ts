@@ -8,26 +8,62 @@ export function exportToExcel(data: (SignupEntry | BusinessCardEntry)[], docType
   let sheetName: string;
 
   if (docType === 'signup-sheet') {
-    const rows = (data as SignupEntry[]).map(e => ({
-      'Full Name': e.fullName,
-      'Phone': e.phone,
-      'Email': e.email,
-      'Date': e.date,
-      'Comments': e.comments,
-    }));
+    const entries = data as SignupEntry[];
+
+    // Collect all extra field keys across all entries
+    const extraKeys = new Set<string>();
+    entries.forEach((e) => {
+      if (e.extraFields) {
+        Object.keys(e.extraFields).forEach((k) => extraKeys.add(k));
+      }
+    });
+
+    const rows = entries.map(e => {
+      const row: Record<string, string> = {
+        'Full Name': e.fullName,
+        'Organization': e.organization,
+        'Phone': e.phone,
+        'Email': e.email,
+        'Screening': e.screening,
+        'Share Info': e.shareInfo,
+        'Date': e.date,
+        'Comments': e.comments,
+      };
+      for (const key of extraKeys) {
+        row[key] = e.extraFields?.[key] ?? '';
+      }
+      return row;
+    });
     ws = XLSX.utils.json_to_sheet(rows);
     sheetName = 'Sign-Up Sheet';
   } else {
-    const rows = (data as BusinessCardEntry[]).map(e => ({
-      'First Name': e.firstName,
-      'Last Name': e.lastName,
-      'Company': e.company,
-      'Title': e.title,
-      'Phone': e.phone,
-      'Email': e.email,
-      'Website': e.website,
-      'Address': e.address,
-    }));
+    const entries = data as BusinessCardEntry[];
+
+    const extraKeys = new Set<string>();
+    entries.forEach((e) => {
+      if (e.extraFields) {
+        Object.keys(e.extraFields).forEach((k) => extraKeys.add(k));
+      }
+    });
+
+    const rows = entries.map(e => {
+      const row: Record<string, string> = {
+        'Full Name': e.fullName,
+        'First Name': e.firstName,
+        'Last Name': e.lastName,
+        'Company': e.company,
+        'Title': e.title,
+        'Phone': e.phone,
+        'Email': e.email,
+        'Website': e.website,
+        'Address': e.address,
+        'Social': e.social,
+      };
+      for (const key of extraKeys) {
+        row[key] = e.extraFields?.[key] ?? '';
+      }
+      return row;
+    });
     ws = XLSX.utils.json_to_sheet(rows);
     sheetName = 'Business Cards';
   }
