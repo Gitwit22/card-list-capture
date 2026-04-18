@@ -31,8 +31,11 @@ export function DataReview({ docType, data, onChange }: DataReviewProps) {
 
   const signupFields = [
     { key: 'fullName', label: 'Full Name' },
+    { key: 'organization', label: 'Organization' },
     { key: 'phone', label: 'Phone' },
     { key: 'email', label: 'Email' },
+    { key: 'screening', label: 'Screening' },
+    { key: 'shareInfo', label: 'Share Info' },
     { key: 'date', label: 'Date' },
     { key: 'comments', label: 'Comments' },
   ];

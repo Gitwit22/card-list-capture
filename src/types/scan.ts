@@ -3,8 +3,11 @@ export type DocumentType = 'signup-sheet' | 'business-card';
 export interface SignupEntry {
   id: string;
   fullName: string;
+  organization: string;
   phone: string;
   email: string;
+  screening: string;
+  shareInfo: string;
   date: string;
   comments: string;
 }

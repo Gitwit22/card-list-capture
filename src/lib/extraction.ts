@@ -8,8 +8,11 @@ const DOC_INTEL_TOKEN = import.meta.env.VITE_DOC_INTEL_TOKEN as string;
 const SIGNUP_SCHEMA = {
   fields: [
     { key: 'fullName', description: 'Full name of the person' },
+    { key: 'organization', description: 'Organization or company affiliation' },
     { key: 'phone', description: 'Phone number' },
     { key: 'email', description: 'Email address' },
+    { key: 'screening', description: 'Screening or waiver checkbox' },
+    { key: 'shareInfo', description: 'Consent to share contact information' },
     { key: 'date', description: 'Date signed up' },
     { key: 'comments', description: 'Any comments or notes' },
   ],
@@ -43,11 +46,17 @@ interface SigninProcessResponse {
   status: string;
   rows: Array<{
     fullName?: string;
+    organization?: string;
     phone?: string;
     email?: string;
+    screening?: string;
+    shareInfo?: string;
     date?: string;
     comments?: string;
   }>;
+  structure?: string;
+  detectedHeaders?: string[];
+  headerMapping?: Record<string, string>;
 }
 
 interface BusinessCardProcessResponse {
@@ -62,6 +71,9 @@ interface BusinessCardProcessResponse {
     website?: string;
     address?: string;
   };
+  structure?: string;
+  detectedHeaders?: string[];
+  headerMapping?: Record<string, string>;
 }
 
 export async function extractFromImage(
@@ -99,6 +111,13 @@ export async function extractFromImage(
   if (processRes.ok) {
     if (docType === 'business-card') {
       const result: BusinessCardProcessResponse = await processRes.json();
+      if (process.env.NODE_ENV !== 'production') {
+        console.debug('[Scan2Sheet] business-card response:', {
+          structure: result.structure,
+          detectedHeaders: result.detectedHeaders,
+          headerMapping: result.headerMapping,
+        });
+      }
       const card = result.card ?? {};
       return [
         {
@@ -116,12 +135,23 @@ export async function extractFromImage(
     }
 
     const result: SigninProcessResponse = await processRes.json();
+    if (process.env.NODE_ENV !== 'production') {
+      console.debug('[Scan2Sheet] signin-sheet response:', {
+        structure: result.structure,
+        detectedHeaders: result.detectedHeaders,
+        headerMapping: result.headerMapping,
+        rowCount: result.rows?.length,
+      });
+    }
     if (Array.isArray(result.rows) && result.rows.length > 0) {
       return result.rows.map((row) => ({
         id: crypto.randomUUID(),
         fullName: row.fullName ?? '',
+        organization: row.organization ?? '',
         phone: row.phone ?? '',
         email: row.email ?? '',
+        screening: row.screening ?? '',
+        shareInfo: row.shareInfo ?? '',
         date: row.date ?? '',
         comments: row.comments ?? '',
       }));
@@ -172,8 +202,11 @@ export async function extractFromImage(
     {
       id: crypto.randomUUID(),
       fullName: fieldMap['fullName'] ?? '',
+      organization: fieldMap['organization'] ?? '',
       phone: fieldMap['phone'] ?? '',
       email: fieldMap['email'] ?? '',
+      screening: fieldMap['screening'] ?? '',
+      shareInfo: fieldMap['shareInfo'] ?? '',
       date: fieldMap['date'] ?? '',
       comments: fieldMap['comments'] ?? '',
     },
@@ -184,8 +217,11 @@ export function createEmptySignupEntry(): SignupEntry {
   return {
     id: crypto.randomUUID(),
     fullName: '',
+    organization: '',
     phone: '',
     email: '',
+    screening: '',
+    shareInfo: '',
     date: '',
     comments: '',
   };

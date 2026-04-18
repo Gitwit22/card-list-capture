@@ -10,8 +10,11 @@ export function exportToExcel(data: (SignupEntry | BusinessCardEntry)[], docType
   if (docType === 'signup-sheet') {
     const rows = (data as SignupEntry[]).map(e => ({
       'Full Name': e.fullName,
+      'Organization': e.organization,
       'Phone': e.phone,
       'Email': e.email,
+      'Screening': e.screening,
+      'Share Info': e.shareInfo,
       'Date': e.date,
       'Comments': e.comments,
     }));
