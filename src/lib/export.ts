@@ -30,6 +30,10 @@ export function exportToExcel(data: (SignupEntry | BusinessCardEntry)[], docType
       'Email': e.email,
       'Website': e.website,
       'Address': e.address,
+      'Source': e.sourceLabel || '',
+      'Capture Type': e.sourceType || '',
+      'Status': e.status || (e.needsReview ? 'needs_review' : 'complete'),
+      'Notes': e.error || '',
     }));
     ws = XLSX.utils.json_to_sheet(rows);
     sheetName = 'Business Cards';

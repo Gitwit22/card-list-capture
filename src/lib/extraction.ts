@@ -1,4 +1,4 @@
-import { DocumentType, SignupEntry, BusinessCardEntry } from '@/types/scan';
+import { BatchItem, BatchProgressSnapshot, DocumentType, SignupEntry, BusinessCardEntry } from '@/types/scan';
 
 const MAX_IMAGE_SIZE_MB = 20;
 
@@ -211,6 +211,143 @@ export async function extractFromImage(
       comments: fieldMap['comments'] ?? '',
     },
   ];
+}
+
+export interface BatchExtractionOptions {
+  concurrency?: number;
+  itemIds?: string[];
+  onItemUpdate?: (id: string, patch: Partial<BatchItem>) => void;
+  onProgress?: (snapshot: BatchProgressSnapshot) => void;
+}
+
+export interface BatchExtractionResult {
+  items: BatchItem[];
+  combinedRows: BusinessCardEntry[];
+  summary: BatchProgressSnapshot;
+}
+
+const DEFAULT_BATCH_CONCURRENCY = 3;
+
+function getBatchSnapshot(items: BatchItem[]): BatchProgressSnapshot {
+  const snapshot: BatchProgressSnapshot = {
+    total: items.length,
+    queued: 0,
+    processing: 0,
+    done: 0,
+    failed: 0,
+    needsReview: 0,
+  };
+
+  for (const item of items) {
+    if (item.status === 'queued') snapshot.queued += 1;
+    if (item.status === 'processing') snapshot.processing += 1;
+    if (item.status === 'done') snapshot.done += 1;
+    if (item.status === 'failed') snapshot.failed += 1;
+    if (item.status === 'needs_review') snapshot.needsReview += 1;
+  }
+
+  return snapshot;
+}
+
+function withBusinessCardMetadata(item: BatchItem, rows: BusinessCardEntry[]): BusinessCardEntry[] {
+  const sourceLabel = item.filename || `Image ${item.index + 1}`;
+  return rows.map((row) => {
+    const hasCoreFields = [row.firstName, row.lastName, row.company, row.email, row.phone]
+      .some((value) => (value ?? '').trim().length > 0);
+    const rowNeedsReview = item.needsReview || !hasCoreFields;
+
+    return {
+      ...row,
+      sourceLabel,
+      sourceItemId: item.id,
+      sourceType: item.sourceType,
+      needsReview: rowNeedsReview,
+      status: rowNeedsReview ? 'needs_review' : 'complete',
+    };
+  });
+}
+
+export async function extractBusinessCardBatch(
+  items: BatchItem[],
+  options: BatchExtractionOptions = {}
+): Promise<BatchExtractionResult> {
+  const targetIds = new Set(options.itemIds ?? items.map((item) => item.id));
+  const targetItems = items.filter((item) => targetIds.has(item.id));
+  const concurrency = Math.max(1, options.concurrency ?? DEFAULT_BATCH_CONCURRENCY);
+
+  for (const item of targetItems) {
+    if (item.status === 'failed') {
+      item.status = 'queued';
+      item.error = undefined;
+      item.extractedRows = [];
+      item.needsReview = false;
+    }
+  }
+
+  options.onProgress?.(getBatchSnapshot(items));
+
+  let cursor = 0;
+
+  const runWorker = async () => {
+    while (cursor < targetItems.length) {
+      const currentIndex = cursor;
+      cursor += 1;
+      const item = targetItems[currentIndex];
+
+      item.status = 'processing';
+      options.onItemUpdate?.(item.id, { status: 'processing', error: undefined });
+      options.onProgress?.(getBatchSnapshot(items));
+
+      try {
+        const rows = await extractFromImage(item.file, 'business-card') as BusinessCardEntry[];
+        const normalizedRows = withBusinessCardMetadata(item, rows);
+        const needsReview = normalizedRows.some((row) => row.needsReview);
+
+        item.extractedRows = normalizedRows;
+        item.needsReview = needsReview;
+        item.status = needsReview ? 'needs_review' : 'done';
+        item.error = undefined;
+
+        options.onItemUpdate?.(item.id, {
+          status: item.status,
+          extractedRows: normalizedRows,
+          needsReview,
+          error: undefined,
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Extraction failed';
+        item.extractedRows = [];
+        item.status = 'failed';
+        item.needsReview = true;
+        item.error = message;
+
+        options.onItemUpdate?.(item.id, {
+          status: 'failed',
+          extractedRows: [],
+          needsReview: true,
+          error: message,
+        });
+      }
+
+      options.onProgress?.(getBatchSnapshot(items));
+    }
+  };
+
+  const workerCount = Math.min(concurrency, targetItems.length || 1);
+  await Promise.all(Array.from({ length: workerCount }, () => runWorker()));
+
+  const combinedRows = items.flatMap((item) => item.extractedRows);
+  const summary = getBatchSnapshot(items);
+
+  return {
+    items,
+    combinedRows,
+    summary,
+  };
+}
+
+export function getDefaultBatchConcurrency() {
+  return DEFAULT_BATCH_CONCURRENCY;
 }
 
 export function createEmptySignupEntry(): SignupEntry {
