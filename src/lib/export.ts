@@ -2,17 +2,28 @@ import * as XLSX from 'xlsx';
 import { DocumentType, SignupEntry, BusinessCardEntry, ExtractionMeta } from '@/types/scan';
 import { buildSignupReviewModel } from '@/lib/reviewModel';
 
-export function exportToExcel(
+export type ExportFormat = 'xlsx' | 'csv' | 'tsv' | 'json' | 'md';
+
+export interface ExportOptions {
+  includeColumns?: string[];
+}
+
+interface ExportPayload {
+  rows: Record<string, string>[];
+  defaultName: string;
+  sheetName: string;
+}
+
+function normalizeCellValue(value: unknown): string {
+  if (value === null || value === undefined) return '';
+  return String(value);
+}
+
+function getExportPayload(
   data: (SignupEntry | BusinessCardEntry)[],
   docType: DocumentType,
-  filename?: string,
   meta?: ExtractionMeta,
-) {
-  const wb = XLSX.utils.book_new();
-
-  let ws: XLSX.WorkSheet;
-  let sheetName: string;
-
+): ExportPayload {
   if (docType === 'signup-sheet') {
     const entries = data as SignupEntry[];
     const reviewModel = buildSignupReviewModel(entries, meta);
@@ -20,66 +31,201 @@ export function exportToExcel(
     const rows = reviewModel.rows.map((reviewRow) => {
       const row: Record<string, string> = {};
       reviewModel.columns.forEach((column) => {
-        row[column.label] = reviewRow.values[column.key] ?? '';
+        row[column.label] = normalizeCellValue(reviewRow.values[column.key]);
       });
       return row;
     });
 
-    ws = XLSX.utils.json_to_sheet(rows);
-    sheetName = 'Sign-Up Sheet';
-  } else {
-    const entries = data as BusinessCardEntry[];
-
-    const extraKeys = new Set<string>();
-    entries.forEach((entry) => {
-      Object.keys(entry.extraFields ?? {}).forEach((key) => extraKeys.add(key));
-    });
-
-    const rows = entries.map((entry) => {
-      const row: Record<string, string> = {
-        'Full Name': entry.fullName,
-        'First Name': entry.firstName,
-        'Last Name': entry.lastName,
-        'Company': entry.company,
-        'Title': entry.title,
-        'Phone': entry.phone,
-        'Email': entry.email,
-        'Website': entry.website,
-        'Address': entry.address,
-        'Social': entry.social,
-        'Source': entry.sourceLabel || '',
-        'Source Card Id': entry.sourceCardId || entry.sourceItemId || '',
-        'Has Back': entry.hasBack ? 'yes' : 'no',
-        'Capture Type': entry.sourceType || '',
-        'Status': entry.status || (entry.needsReview ? 'needs_review' : 'complete'),
-        'Conflict Fields': (entry.conflictFields ?? []).join(', '),
-        'Back Text': entry.backText || '',
-        'Notes': entry.error || '',
-      };
-
-      for (const key of extraKeys) {
-        row[key] = entry.extraFields?.[key] ?? '';
-      }
-
-      return row;
-    });
-
-    ws = XLSX.utils.json_to_sheet(rows);
-    sheetName = 'Business Cards';
+    return {
+      rows,
+      defaultName: 'signup-sheet',
+      sheetName: 'Sign-Up Sheet',
+    };
   }
 
-  const colWidths = Object.keys(ws).reduce((acc, key) => {
-    if (key[0] === '!') return acc;
-    const col = key.replace(/[0-9]/g, '');
-    const val = ws[key]?.v?.toString() || '';
-    acc[col] = Math.max(acc[col] || 10, val.length + 2);
-    return acc;
-  }, {} as Record<string, number>);
+  const entries = data as BusinessCardEntry[];
+  const extraKeys = new Set<string>();
+  entries.forEach((entry) => {
+    Object.keys(entry.extraFields ?? {}).forEach((key) => extraKeys.add(key));
+  });
 
-  ws['!cols'] = Object.values(colWidths).map((w) => ({ wch: Math.min(w, 40) }));
+  const rows = entries.map((entry) => {
+    const row: Record<string, string> = {
+      'Full Name': normalizeCellValue(entry.fullName),
+      'First Name': normalizeCellValue(entry.firstName),
+      'Last Name': normalizeCellValue(entry.lastName),
+      'Company': normalizeCellValue(entry.company),
+      'Title': normalizeCellValue(entry.title),
+      'Phone': normalizeCellValue(entry.phone),
+      'Email': normalizeCellValue(entry.email),
+      'Website': normalizeCellValue(entry.website),
+      'Address': normalizeCellValue(entry.address),
+      'Social': normalizeCellValue(entry.social),
+      'Source': normalizeCellValue(entry.sourceLabel || ''),
+      'Source Card Id': normalizeCellValue(entry.sourceCardId || entry.sourceItemId || ''),
+      'Has Back': entry.hasBack ? 'yes' : 'no',
+      'Capture Type': normalizeCellValue(entry.sourceType || ''),
+      'Status': normalizeCellValue(entry.status || (entry.needsReview ? 'needs_review' : 'complete')),
+      'Conflict Fields': normalizeCellValue((entry.conflictFields ?? []).join(', ')),
+      'Back Text': normalizeCellValue(entry.backText || ''),
+      'Notes': normalizeCellValue(entry.error || ''),
+    };
 
-  XLSX.utils.book_append_sheet(wb, ws, sheetName);
+    for (const key of extraKeys) {
+      row[key] = normalizeCellValue(entry.extraFields?.[key] ?? '');
+    }
 
-  const defaultName = docType === 'signup-sheet' ? 'signup-sheet' : 'business-cards';
-  XLSX.writeFile(wb, `${filename || defaultName}.xlsx`);
+    return row;
+  });
+
+  return {
+    rows,
+    defaultName: 'business-cards',
+    sheetName: 'Business Cards',
+  };
+}
+
+export function getExportColumns(
+  data: (SignupEntry | BusinessCardEntry)[],
+  docType: DocumentType,
+  meta?: ExtractionMeta,
+): string[] {
+  const { rows } = getExportPayload(data, docType, meta);
+  const columns: string[] = [];
+  const seen = new Set<string>();
+
+  rows.forEach((row) => {
+    Object.keys(row).forEach((key) => {
+      if (seen.has(key)) return;
+      seen.add(key);
+      columns.push(key);
+    });
+  });
+
+  return columns;
+}
+
+function filterRowsByColumns(rows: Record<string, string>[], includeColumns?: string[]): Record<string, string>[] {
+  if (!includeColumns || includeColumns.length === 0) return rows;
+
+  const allowed = new Set(includeColumns);
+  return rows.map((row) => {
+    const filtered: Record<string, string> = {};
+    Object.keys(row).forEach((key) => {
+      if (!allowed.has(key)) return;
+      filtered[key] = row[key] ?? '';
+    });
+    return filtered;
+  });
+}
+
+function quoteCsvCell(value: string, delimiter: ',' | '\t'): string {
+  if (!value.includes('"') && !value.includes('\n') && !value.includes('\r') && !value.includes(delimiter)) {
+    return value;
+  }
+
+  return `"${value.replace(/"/g, '""')}"`;
+}
+
+function toDelimited(rows: Record<string, string>[], delimiter: ',' | '\t'): string {
+  const headerSet = new Set<string>();
+  rows.forEach((row) => {
+    Object.keys(row).forEach((key) => headerSet.add(key));
+  });
+
+  const headers = Array.from(headerSet);
+  const lines: string[] = [];
+  lines.push(headers.map((header) => quoteCsvCell(header, delimiter)).join(delimiter));
+
+  rows.forEach((row) => {
+    const values = headers.map((header) => quoteCsvCell(row[header] ?? '', delimiter));
+    lines.push(values.join(delimiter));
+  });
+
+  return lines.join('\n');
+}
+
+function toMarkdownTable(rows: Record<string, string>[]): string {
+  const headerSet = new Set<string>();
+  rows.forEach((row) => {
+    Object.keys(row).forEach((key) => headerSet.add(key));
+  });
+  const headers = Array.from(headerSet);
+
+  const safe = (value: string) => value.replace(/\|/g, '\\|').replace(/\n/g, ' ');
+
+  const headerLine = `| ${headers.map((h) => safe(h)).join(' | ')} |`;
+  const separatorLine = `| ${headers.map(() => '---').join(' | ')} |`;
+  const bodyLines = rows.map((row) => `| ${headers.map((h) => safe(row[h] ?? '')).join(' | ')} |`);
+
+  return [headerLine, separatorLine, ...bodyLines].join('\n');
+}
+
+function downloadText(content: string, mimeType: string, fileName: string): void {
+  const blob = new Blob([content], { type: `${mimeType};charset=utf-8` });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = fileName;
+  document.body.appendChild(anchor);
+  anchor.click();
+  document.body.removeChild(anchor);
+  URL.revokeObjectURL(url);
+}
+
+export function exportData(
+  data: (SignupEntry | BusinessCardEntry)[],
+  docType: DocumentType,
+  format: ExportFormat,
+  filename?: string,
+  meta?: ExtractionMeta,
+  options?: ExportOptions,
+) {
+  const { rows: payloadRows, defaultName, sheetName } = getExportPayload(data, docType, meta);
+  const rows = filterRowsByColumns(payloadRows, options?.includeColumns);
+  const baseName = filename || defaultName;
+
+  if (format === 'xlsx') {
+    const wb = XLSX.utils.book_new();
+    const ws = XLSX.utils.json_to_sheet(rows);
+
+    const colWidths = Object.keys(ws).reduce((acc, key) => {
+      if (key[0] === '!') return acc;
+      const col = key.replace(/[0-9]/g, '');
+      const val = ws[key]?.v?.toString() || '';
+      acc[col] = Math.max(acc[col] || 10, val.length + 2);
+      return acc;
+    }, {} as Record<string, number>);
+
+    ws['!cols'] = Object.values(colWidths).map((w) => ({ wch: Math.min(w, 40) }));
+    XLSX.utils.book_append_sheet(wb, ws, sheetName);
+    XLSX.writeFile(wb, `${baseName}.xlsx`);
+    return;
+  }
+
+  if (format === 'csv') {
+    downloadText(toDelimited(rows, ','), 'text/csv', `${baseName}.csv`);
+    return;
+  }
+
+  if (format === 'tsv') {
+    downloadText(toDelimited(rows, '\t'), 'text/tab-separated-values', `${baseName}.tsv`);
+    return;
+  }
+
+  if (format === 'json') {
+    downloadText(JSON.stringify(rows, null, 2), 'application/json', `${baseName}.json`);
+    return;
+  }
+
+  downloadText(toMarkdownTable(rows), 'text/markdown', `${baseName}.md`);
+}
+
+export function exportToExcel(
+  data: (SignupEntry | BusinessCardEntry)[],
+  docType: DocumentType,
+  filename?: string,
+  meta?: ExtractionMeta,
+) {
+  exportData(data, docType, 'xlsx', filename, meta);
 }

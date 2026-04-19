@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { AlertCircle, ArrowLeft, CheckCircle2, Download, RotateCw, ShieldCheck, Trash2 } from 'lucide-react';
+import { AlertCircle, ArrowLeft, CheckCircle2, ChevronDown, Download, RotateCw, ShieldCheck, Trash2 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -32,7 +32,14 @@ import {
   extractBusinessCardRecord,
   getDefaultBatchConcurrency,
 } from '@/lib/extraction';
-import { exportToExcel } from '@/lib/export';
+import { exportData, getExportColumns, type ExportFormat } from '@/lib/export';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
+import { Checkbox } from '@/components/ui/checkbox';
 import { toast } from 'sonner';
 
 type Step = 'capture' | 'batch-queue' | 'processing' | 'batch-processing' | 'review';
@@ -82,6 +89,28 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
   const [singleCardDraft, setSingleCardDraft] = useState<BatchCardItem | null>(null);
   const [rapidPendingCardId, setRapidPendingCardId] = useState<string | null>(null);
   const [businessCardFilter, setBusinessCardFilter] = useState<BusinessCardFilter>('all');
+  const [exportFormat, setExportFormat] = useState<ExportFormat>('xlsx');
+  const [exportColumnSelection, setExportColumnSelection] = useState<Record<string, boolean>>({});
+
+  const availableExportColumns = useMemo(
+    () => getExportColumns(data, 'business-card'),
+    [data],
+  );
+
+  const selectedExportColumns = useMemo(
+    () => availableExportColumns.filter((column) => exportColumnSelection[column] !== false),
+    [availableExportColumns, exportColumnSelection],
+  );
+
+  useEffect(() => {
+    setExportColumnSelection((prev) => {
+      const next: Record<string, boolean> = {};
+      availableExportColumns.forEach((column) => {
+        next[column] = prev[column] ?? true;
+      });
+      return next;
+    });
+  }, [availableExportColumns]);
 
   // ── Session persistence ───────────────────────────────────────────────────
   const sessionIdRef = useRef<string>(crypto.randomUUID());
@@ -588,7 +617,7 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
     await processSingleCardDraft(nextDraft);
   };
 
-  const handleExport = async () => {
+  const handleExport = async (format: ExportFormat = exportFormat) => {
     if (data.length === 0) {
       toast.error('No data to export');
       return;
@@ -605,8 +634,10 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
       ? `business-cards-batch-${new Date().toISOString().slice(0, 10)}`
       : undefined;
 
-    exportToExcel(exportRows, 'business-card', filename);
-    toast.success('Exported to Excel!');
+    exportData(exportRows, 'business-card', format, filename, undefined, {
+      includeColumns: selectedExportColumns,
+    });
+    toast.success(`Exported ${format.toUpperCase()} successfully!`);
 
     const settings = getSessionSettings();
     if (settings.autoDeletePhotosAfterExport) {
@@ -1006,14 +1037,108 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
               <p className="text-sm text-muted-foreground">
                 Ready to export: {data.filter((row) => row.status !== 'failed').length} rows
               </p>
-              <Button type="button" size="sm" variant="outline" onClick={retryFailedFromReview}>
-                Retry Failed
-              </Button>
+              <div className="flex items-center gap-2">
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button type="button" size="sm" variant="outline">
+                      {exportFormat.toUpperCase()}
+                      <ChevronDown className="w-4 h-4 ml-1" />
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end">
+                    <DropdownMenuItem onClick={() => setExportFormat('xlsx')}>Excel (.xlsx)</DropdownMenuItem>
+                    <DropdownMenuItem onClick={() => setExportFormat('csv')}>CSV (.csv)</DropdownMenuItem>
+                    <DropdownMenuItem onClick={() => setExportFormat('tsv')}>TSV (.tsv)</DropdownMenuItem>
+                    <DropdownMenuItem onClick={() => setExportFormat('json')}>JSON (.json)</DropdownMenuItem>
+                    <DropdownMenuItem onClick={() => setExportFormat('md')}>Markdown (.md)</DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+                <Button type="button" size="sm" variant="outline" onClick={retryFailedFromReview}>
+                  Retry Failed
+                </Button>
+              </div>
             </div>
 
-            <Button onClick={handleExport} className="w-full scan-gradient scan-shadow h-12 text-primary-foreground font-medium">
+            <div className="rounded-md border border-border p-3 bg-card space-y-3">
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-sm font-medium text-foreground">Export Columns</p>
+                <p className="text-xs text-muted-foreground">{selectedExportColumns.length}/{availableExportColumns.length} selected</p>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => {
+                    setExportColumnSelection((prev) => {
+                      const next = { ...prev };
+                      availableExportColumns.forEach((column) => {
+                        next[column] = true;
+                      });
+                      return next;
+                    });
+                  }}
+                >
+                  Select all
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => {
+                    setExportColumnSelection((prev) => {
+                      const next = { ...prev };
+                      availableExportColumns.forEach((column) => {
+                        next[column] = false;
+                      });
+                      return next;
+                    });
+                  }}
+                >
+                  Clear all
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => {
+                    setExportColumnSelection((prev) => {
+                      const next = { ...prev };
+                      availableExportColumns.forEach((column) => {
+                        next[column] = true;
+                      });
+                      return next;
+                    });
+                  }}
+                >
+                  Reset to detected
+                </Button>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-48 overflow-auto pr-1">
+                {availableExportColumns.map((column) => (
+                  <label key={column} className="flex items-center gap-2 text-sm text-foreground">
+                    <Checkbox
+                      checked={exportColumnSelection[column] !== false}
+                      onCheckedChange={(checked) => {
+                        setExportColumnSelection((prev) => ({
+                          ...prev,
+                          [column]: Boolean(checked),
+                        }));
+                      }}
+                    />
+                    <span className="truncate">{column}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+
+            <Button
+              onClick={() => handleExport()}
+              disabled={selectedExportColumns.length === 0}
+              className="w-full scan-gradient scan-shadow h-12 text-primary-foreground font-medium"
+            >
               <Download className="w-5 h-5 mr-2" />
-              Export to Excel
+              Export to {exportFormat.toUpperCase()}
             </Button>
           </div>
         )}
