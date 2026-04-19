@@ -1,7 +1,13 @@
 import * as XLSX from 'xlsx';
-import { DocumentType, SignupEntry, BusinessCardEntry } from '@/types/scan';
+import { DocumentType, SignupEntry, BusinessCardEntry, ExtractionMeta } from '@/types/scan';
+import { buildSignupReviewModel } from '@/lib/reviewModel';
 
-export function exportToExcel(data: (SignupEntry | BusinessCardEntry)[], docType: DocumentType, filename?: string) {
+export function exportToExcel(
+  data: (SignupEntry | BusinessCardEntry)[],
+  docType: DocumentType,
+  filename?: string,
+  meta?: ExtractionMeta,
+) {
   const wb = XLSX.utils.book_new();
 
   let ws: XLSX.WorkSheet;
@@ -9,28 +15,13 @@ export function exportToExcel(data: (SignupEntry | BusinessCardEntry)[], docType
 
   if (docType === 'signup-sheet') {
     const entries = data as SignupEntry[];
+    const reviewModel = buildSignupReviewModel(entries, meta);
 
-    const extraKeys = new Set<string>();
-    entries.forEach((entry) => {
-      Object.keys(entry.extraFields ?? {}).forEach((key) => extraKeys.add(key));
-    });
-
-    const rows = entries.map((entry) => {
-      const row: Record<string, string> = {
-        'Full Name': entry.fullName,
-        'Organization': entry.organization,
-        'Phone': entry.phone,
-        'Email': entry.email,
-        'Screening': entry.screening,
-        'Share Info': entry.shareInfo,
-        'Date': entry.date,
-        'Comments': entry.comments,
-      };
-
-      for (const key of extraKeys) {
-        row[key] = entry.extraFields?.[key] ?? '';
-      }
-
+    const rows = reviewModel.rows.map((reviewRow) => {
+      const row: Record<string, string> = {};
+      reviewModel.columns.forEach((column) => {
+        row[column.label] = reviewRow.values[column.key] ?? '';
+      });
       return row;
     });
 

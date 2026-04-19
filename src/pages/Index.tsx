@@ -551,7 +551,7 @@ const Index = () => {
       ? `business-cards-batch-${new Date().toISOString().slice(0, 10)}`
       : undefined;
 
-    exportToExcel(typedData, docType, filename);
+    exportToExcel(typedData, docType, filename, extractionMeta);
     toast.success(`Exported to Excel!${clearSessionAfter ? ' Session cleared.' : ''}`);
 
     if (clearSessionAfter) {

@@ -1,10 +1,11 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { SignupEntry, BusinessCardEntry, DocumentType, ExtractionMeta } from '@/types/scan';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Trash2, Plus, ChevronDown, ChevronRight } from 'lucide-react';
 import { createEmptySignupEntry, createEmptyBusinessCard } from '@/lib/extraction';
+import { buildSignupReviewModel } from '@/lib/reviewModel';
 
 type BusinessCardFilter = 'all' | 'needs_review' | 'complete' | 'failed';
 
@@ -70,16 +71,15 @@ export function DataReview({
     setShowExtras((prev) => ({ ...prev, [entryId]: !prev[entryId] }));
   };
 
-  const signupFields = [
-    { key: 'fullName', label: 'Full Name' },
-    { key: 'organization', label: 'Organization' },
-    { key: 'phone', label: 'Phone' },
-    { key: 'email', label: 'Email' },
-    { key: 'screening', label: 'Screening' },
-    { key: 'shareInfo', label: 'Share Info' },
-    { key: 'date', label: 'Date' },
-    { key: 'comments', label: 'Comments' },
-  ];
+  const signupEntries = useMemo(() => {
+    if (docType !== 'signup-sheet') return [];
+    return data as SignupEntry[];
+  }, [data, docType]);
+
+  const signupReviewModel = useMemo(() => {
+    if (docType !== 'signup-sheet') return null;
+    return buildSignupReviewModel(signupEntries, meta);
+  }, [docType, signupEntries, meta]);
 
   const cardFields = [
     { key: 'fullName', label: 'Full Name' },
@@ -94,7 +94,9 @@ export function DataReview({
     { key: 'social', label: 'Social' },
   ];
 
-  const fields = docType === 'signup-sheet' ? signupFields : cardFields;
+  const fields = docType === 'signup-sheet'
+    ? (signupReviewModel?.columns ?? [])
+    : cardFields;
 
   const filteredData = docType === 'business-card'
     ? (data as BusinessCardEntry[]).filter((entry) => {
@@ -196,7 +198,7 @@ export function DataReview({
       <div className="space-y-3">
         {filteredData.map((entry, index) => {
           const extras = (entry as SignupEntry | BusinessCardEntry).extraFields ?? {};
-          const hasExtras = Object.keys(extras).length > 0;
+          const hasExtras = docType !== 'signup-sheet' && Object.keys(extras).length > 0;
 
           return (
             <div key={entry.id} className="bg-card rounded-lg border border-border p-4 card-shadow">
@@ -277,8 +279,17 @@ export function DataReview({
                   <div key={field.key}>
                     <label className="text-xs font-medium text-muted-foreground mb-1 block">{field.label}</label>
                     <Input
-                      value={(entry as Record<string, string>)[field.key] || ''}
-                      onChange={(e) => updateField(entry.id, field.key, e.target.value)}
+                      value={docType === 'signup-sheet'
+                        ? (signupReviewModel?.rows.find((row) => row.id === entry.id)?.values[field.key] || '')
+                        : ((entry as Record<string, string>)[field.key] || '')}
+                      onChange={(e) => {
+                        if (docType === 'signup-sheet' && !field.canonical) {
+                          updateExtraField(entry.id, field.sourceKey || field.label, e.target.value);
+                          return;
+                        }
+
+                        updateField(entry.id, field.key, e.target.value);
+                      }}
                       placeholder={field.label}
                       className="h-9 text-sm"
                     />

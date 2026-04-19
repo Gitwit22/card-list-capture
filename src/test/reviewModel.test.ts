@@ -1,0 +1,139 @@
+import { describe, expect, it } from 'vitest';
+import { buildSignupReviewModel } from '@/lib/reviewModel';
+import { ExtractionMeta, SignupEntry } from '@/types/scan';
+
+describe('reviewModel', () => {
+  it('uses detected headers in order and maps values without forcing canonical labels', () => {
+    const entries: SignupEntry[] = [
+      {
+        id: 'r1',
+        fullName: 'Robert Dostle',
+        organization: 'Tech Tech',
+        phone: '602-254-1404',
+        email: 'rdostle@tech.com',
+        screening: '',
+        shareInfo: '',
+        date: '',
+        comments: '',
+        extraFields: {
+          'Access to Website?': 'Y',
+          Badge: '1234',
+        },
+      },
+    ];
+
+    const meta: ExtractionMeta = {
+      structure: 'table',
+      detectedHeaders: ['Name', 'Organization', 'Phone Number', 'Email Address', 'Access to Website?'],
+      headerMapping: [
+        { original: 'Name', normalized: 'fullName' },
+        { original: 'Organization', normalized: 'organization' },
+        { original: 'Phone Number', normalized: 'phone' },
+        { original: 'Email Address', normalized: 'email' },
+        { original: 'Access to Website?', normalized: null },
+      ],
+      confidence: 0.88,
+    };
+
+    const model = buildSignupReviewModel(entries, meta);
+
+    expect(model.columns.map((column) => column.label)).toEqual([
+      'Name',
+      'Organization',
+      'Phone Number',
+      'Email Address',
+      'Access to Website?',
+    ]);
+
+    expect(model.rows).toHaveLength(1);
+    const nameColumn = model.columns.find((column) => column.label === 'Name');
+    const orgColumn = model.columns.find((column) => column.label === 'Organization');
+    const phoneColumn = model.columns.find((column) => column.label === 'Phone Number');
+    const emailColumn = model.columns.find((column) => column.label === 'Email Address');
+    const accessColumn = model.columns.find((column) => column.label === 'Access to Website?');
+
+    expect(nameColumn).toBeDefined();
+    expect(orgColumn).toBeDefined();
+    expect(phoneColumn).toBeDefined();
+    expect(emailColumn).toBeDefined();
+    expect(accessColumn).toBeDefined();
+    expect(model.rows[0].values[nameColumn!.key]).toBe('Robert Dostle');
+    expect(model.rows[0].values[orgColumn!.key]).toBe('Tech Tech');
+    expect(model.rows[0].values[phoneColumn!.key]).toBe('602-254-1404');
+    expect(model.rows[0].values[emailColumn!.key]).toBe('rdostle@tech.com');
+    expect(model.rows[0].values[accessColumn!.key]).toBe('Y');
+  });
+
+  it('prefers rawRows when available so review reflects source parse output', () => {
+    const entries: SignupEntry[] = [
+      {
+        id: 'r1',
+        fullName: 'Mismatch Name',
+        organization: '',
+        phone: '',
+        email: '',
+        screening: '',
+        shareInfo: '',
+        date: '',
+        comments: '',
+        extraFields: { Department: 'Should Not Win' },
+      },
+    ];
+
+    const model = buildSignupReviewModel(entries, {
+      structure: 'table',
+      detectedHeaders: ['Name', 'Organization', 'Department'],
+      headerMapping: [
+        { original: 'Name', normalized: 'fullName' },
+        { original: 'Organization', normalized: 'organization' },
+        { original: 'Department', normalized: null },
+      ],
+      confidence: 0.9,
+      rawRows: [
+        { Name: 'Parsed Name', Organization: 'Parsed Org', Department: 'Parsed Dept' },
+      ],
+    });
+
+    expect(model.columns.map((column) => column.label)).toEqual([
+      'Name',
+      'Organization',
+      'Department',
+    ]);
+
+    expect(model.rows).toHaveLength(1);
+    const nameColumn = model.columns.find((column) => column.label === 'Name');
+    const orgColumn = model.columns.find((column) => column.label === 'Organization');
+    const deptColumn = model.columns.find((column) => column.label === 'Department');
+
+    expect(nameColumn).toBeDefined();
+    expect(orgColumn).toBeDefined();
+    expect(deptColumn).toBeDefined();
+    expect(model.rows[0].values[nameColumn!.key]).toBe('Parsed Name');
+    expect(model.rows[0].values[orgColumn!.key]).toBe('Parsed Org');
+    expect(model.rows[0].values[deptColumn!.key]).toBe('Parsed Dept');
+  });
+
+  it('falls back to canonical labels only when metadata is absent', () => {
+    const entries: SignupEntry[] = [
+      {
+        id: 'r1',
+        fullName: 'Fallback Name',
+        organization: 'Fallback Org',
+        phone: '',
+        email: '',
+        screening: '',
+        shareInfo: '',
+        date: '',
+        comments: '',
+        extraFields: {},
+      },
+    ];
+
+    const model = buildSignupReviewModel(entries, undefined);
+
+    expect(model.columns.map((column) => column.label)).toEqual([
+      'Full Name',
+      'Organization',
+    ]);
+  });
+});
