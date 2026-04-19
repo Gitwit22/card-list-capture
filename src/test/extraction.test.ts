@@ -392,6 +392,37 @@ describe('extraction', () => {
       expect(row.phone).toBe('313-555-0110');
     });
 
+    it('does not leak header-only rows through the fallback mapper', async () => {
+      const mockResponse = {
+        status: 'complete',
+        structure: 'table',
+        detectedHeaders: ['Full Name', 'Organization', 'Screening', 'Share Info', 'Date', 'Comments'],
+        headerMapping: [],
+        rows: [
+          {
+            id: 'header-row',
+            fullName: 'Full Name',
+            organization: 'Organization',
+            screening: 'Screening',
+            shareInfo: 'Share Info',
+            date: 'Date',
+            comments: 'Comments',
+          },
+        ],
+        confidence: 0.52,
+      };
+
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(mockResponse),
+      }));
+
+      const file = new File(['test'], 'sheet-fallback-header.pdf', { type: 'application/pdf' });
+      const result = await extractFromImage(file, 'signup-sheet');
+
+      expect(result.entries).toHaveLength(0);
+    });
+
     it('infers columns by values when headers are weak', async () => {
       const mockResponse = {
         status: 'complete',

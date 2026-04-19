@@ -140,7 +140,10 @@ export async function extractFromImage(
         return { entries, meta };
       }
 
-      return { entries: result.rows.map(mapSignupRow), meta };
+      return {
+        entries: mapSignupRowsWithFallbackFiltering(result.rows, result.detectedHeaders ?? []),
+        meta,
+      };
     }
   }
 
@@ -617,6 +620,8 @@ const SIGNUP_FIELD_MAP: Record<SignupCanonicalField, string[]> = {
   comments: ['comments', 'comment', 'notes', 'note', 'remarks', 'message'],
 };
 
+const SIGNUP_ROW_IGNORE_KEYS = new Set(['id', 'extrafields', 'metadata', 'meta', 'region', 'sheet']);
+
 const ORGANIZATION_HINTS = /\b(llc|inc|corp|co|company|agency|group|foundation|ministries|ministry|church|university|college|school|hospital|center|centre|services|network|association|institute)\b/i;
 
 function isLikelyNameValue(value: string): boolean {
@@ -715,6 +720,115 @@ function isLikelyAliasOnlyRow(row: string[]): boolean {
 
   const aliasMatches = nonEmpty.filter((cell) => allAliases.has(cell)).length;
   return aliasMatches >= 2 && aliasMatches >= Math.ceil(nonEmpty.length * 0.7);
+}
+
+function getSignupRawRowSnapshot(raw: Record<string, unknown>): {
+  sourceKeys: string[];
+  cells: string[];
+  metadata: Array<CellMetadata | undefined>;
+} {
+  const sourceKeys = Object.keys(raw).filter((key) => !SIGNUP_ROW_IGNORE_KEYS.has(normalizeKey(key)));
+  return {
+    sourceKeys,
+    cells: sourceKeys.map((key) => asCleanString(raw[key])),
+    metadata: sourceKeys.map((key) => getCellMetadata(raw[key])),
+  };
+}
+
+function isHeaderLikeSignupRow(
+  raw: Record<string, unknown>,
+  options: {
+    detectedHeaders?: string[];
+    headerAliases?: Record<string, string[]>;
+  } = {},
+): boolean {
+  const { sourceKeys, cells, metadata } = getSignupRawRowSnapshot(raw);
+  if (sourceKeys.length === 0) return false;
+  if (isLikelyHeaderRowByMetadata(cells, metadata)) return true;
+
+  const detectedHeaders = options.detectedHeaders ?? [];
+  const headerLabels = detectedHeaders.length === sourceKeys.length ? detectedHeaders : sourceKeys;
+  if (headerLabels.length > 0 && isLikelyHeaderRow(cells, headerLabels)) return true;
+
+  const aliasMap = options.headerAliases ?? SIGNUP_FIELD_MAP;
+  const nonEmptyCount = cells.filter((cell) => cell.trim().length > 0).length;
+  if (nonEmptyCount === 0) return false;
+
+  let labelLikeCount = 0;
+  sourceKeys.forEach((sourceKey, index) => {
+    const value = cells[index] ?? '';
+    if (!value.trim()) return;
+
+    const normalizedValue = normalizeHeader(value);
+    const normalizedHeader = normalizeHeader(headerLabels[index] ?? sourceKey);
+    if (normalizedHeader && normalizedValue === normalizedHeader) {
+      labelLikeCount += 1;
+      return;
+    }
+
+    const aliases = aliasMap[sourceKey as SignupCanonicalField] ?? [];
+    if (aliases.length > 0 && looksLikeAliasValue(value, aliases)) {
+      labelLikeCount += 1;
+    }
+  });
+
+  return isLikelyAliasOnlyRow(cells) || (labelLikeCount >= 2 && labelLikeCount >= Math.ceil(nonEmptyCount * 0.6));
+}
+
+function sanitizeMappedSignupRow(row: SignupEntry): SignupEntry {
+  return {
+    ...row,
+    fullName: looksLikeAliasValue(row.fullName, SIGNUP_FIELD_MAP.fullName) ? '' : row.fullName,
+    organization: looksLikeAliasValue(row.organization, SIGNUP_FIELD_MAP.organization) ? '' : row.organization,
+    phone: looksLikeAliasValue(row.phone, SIGNUP_FIELD_MAP.phone) ? '' : row.phone,
+    email: looksLikeAliasValue(row.email, SIGNUP_FIELD_MAP.email) ? '' : row.email,
+    screening: looksLikeAliasValue(row.screening, SIGNUP_FIELD_MAP.screening) ? '' : row.screening,
+    shareInfo: looksLikeAliasValue(row.shareInfo, SIGNUP_FIELD_MAP.shareInfo) ? '' : row.shareInfo,
+    date: looksLikeAliasValue(row.date, SIGNUP_FIELD_MAP.date) ? '' : row.date,
+    comments: looksLikeAliasValue(row.comments, SIGNUP_FIELD_MAP.comments) ? '' : row.comments,
+  };
+}
+
+function isUsableMappedSignupRow(row: SignupEntry): boolean {
+  const nonEmptyCore = [row.fullName, row.organization, row.email, row.phone].filter((value) => value.trim().length > 0).length;
+  if (nonEmptyCore === 0) return false;
+
+  const nonEmptyValues = [
+    row.fullName,
+    row.organization,
+    row.email,
+    row.phone,
+    row.screening,
+    row.shareInfo,
+    row.date,
+    row.comments,
+  ].filter((value) => value.trim().length > 0);
+
+  if (nonEmptyValues.length === 0) return false;
+
+  const labelLikeCount = [
+    [row.fullName, SIGNUP_FIELD_MAP.fullName],
+    [row.organization, SIGNUP_FIELD_MAP.organization],
+    [row.email, SIGNUP_FIELD_MAP.email],
+    [row.phone, SIGNUP_FIELD_MAP.phone],
+    [row.screening, SIGNUP_FIELD_MAP.screening],
+    [row.shareInfo, SIGNUP_FIELD_MAP.shareInfo],
+    [row.date, SIGNUP_FIELD_MAP.date],
+    [row.comments, SIGNUP_FIELD_MAP.comments],
+  ].filter(([value, aliases]) => Boolean(String(value).trim()) && looksLikeAliasValue(String(value), aliases)).length;
+
+  return !(labelLikeCount >= 2 && labelLikeCount >= Math.ceil(nonEmptyValues.length * 0.6));
+}
+
+function mapSignupRowsWithFallbackFiltering(
+  rows: Array<Record<string, unknown>>,
+  detectedHeaders: string[],
+): SignupEntry[] {
+  return rows
+    .filter((row) => !isHeaderLikeSignupRow(row, { detectedHeaders }))
+    .map(mapSignupRow)
+    .map((entry) => sanitizeMappedSignupRow(reconcileNameAndOrganization(entry)))
+    .filter(isUsableMappedSignupRow);
 }
 
 function computeHeaderMatchScore(header: string, aliases: string[]): number {
@@ -852,12 +966,11 @@ function buildSignupTableData(
   metaMatrix: Array<Array<CellMetadata | undefined>>;
   headerRowIndices: Set<number>;
 } {
-  const ignoreKeys = new Set(['id', 'extrafields', 'metadata', 'meta', 'region', 'sheet']);
   const sourceKeysSet = new Set<string>();
 
   rows.forEach((row) => {
     Object.keys(row).forEach((key) => {
-      if (ignoreKeys.has(normalizeKey(key))) return;
+      if (SIGNUP_ROW_IGNORE_KEYS.has(normalizeKey(key))) return;
       sourceKeysSet.add(key);
     });
   });
@@ -926,20 +1039,13 @@ function mapSignupRowsByColumnResolution(
 ): SignupEntry[] {
   if (rows.length === 0) return [];
 
-  const { sourceKeys, headerLabels, matrix, metaMatrix, headerRowIndices } = buildSignupTableData(rows, detectedHeaders);
+  const { sourceKeys, headerLabels, matrix } = buildSignupTableData(rows, detectedHeaders);
 
   if (sourceKeys.length === 0) {
-    return rows.map(mapSignupRow).filter((entry) => {
-      const nonEmptyCore = [entry.fullName, entry.organization, entry.email, entry.phone].filter((v) => v.trim()).length;
-      return nonEmptyCore > 0;
-    });
+    return mapSignupRowsWithFallbackFiltering(rows, detectedHeaders);
   }
 
-  const nonJunkRows = matrix.filter((row, index) => {
-    if (headerRowIndices.has(index)) return false;
-    if (isLikelyHeaderRowByMetadata(row, metaMatrix[index])) return false;
-    return !isLikelyHeaderRow(row, headerLabels) && !isLikelyAliasOnlyRow(row);
-  });
+  const nonJunkRows = matrix.filter((_, index) => !isHeaderLikeSignupRow(rows[index], { detectedHeaders: headerLabels }));
   const resolvedByHeader = resolveColumnIndices(headerLabels);
   const resolved = inferColumnsFromValues(nonJunkRows, resolvedByHeader);
 
@@ -948,12 +1054,7 @@ function mapSignupRowsByColumnResolution(
   return rows
     .map((row, rowIndex) => {
       const cells = matrix[rowIndex] ?? [];
-      if (
-        headerRowIndices.has(rowIndex)
-        || isLikelyHeaderRowByMetadata(cells, metaMatrix[rowIndex])
-        || isLikelyHeaderRow(cells, headerLabels)
-        || isLikelyAliasOnlyRow(cells)
-      ) {
+      if (isHeaderLikeSignupRow(row, { detectedHeaders: headerLabels })) {
         return null;
       }
 
@@ -987,19 +1088,6 @@ function mapSignupRowsByColumnResolution(
         ? ''
         : organizationRaw;
 
-      const looksLikeLabelRow = (
-        (!fullName || looksLikeAliasValue(fullName, SIGNUP_FIELD_MAP.fullName))
-        && (!organization || looksLikeAliasValue(organization, SIGNUP_FIELD_MAP.organization))
-        && (!email || looksLikeAliasValue(email, SIGNUP_FIELD_MAP.email))
-        && (!phone || looksLikeAliasValue(phone, SIGNUP_FIELD_MAP.phone))
-      );
-
-      if (looksLikeLabelRow) {
-        const filledCount = [fullName, organization, email, phone, screening, shareInfo, date, comments]
-          .filter((value) => value.trim().length > 0).length;
-        if (filledCount >= 2) return null;
-      }
-
       const rowExtra = (row.extraFields ?? {}) as Record<string, unknown>;
       const extraFields: Record<string, string> = {};
 
@@ -1019,9 +1107,6 @@ function mapSignupRowsByColumnResolution(
         }
       }
 
-      const hasCore = [fullName, organization, email, phone].some((value) => value.trim().length > 0);
-      if (!hasCore) return null;
-
       const normalizedEntry = {
         id: String(row.id ?? crypto.randomUUID()),
         fullName,
@@ -1035,7 +1120,8 @@ function mapSignupRowsByColumnResolution(
         extraFields,
       } satisfies SignupEntry;
 
-      return reconcileNameAndOrganization(normalizedEntry);
+      const sanitizedEntry = sanitizeMappedSignupRow(reconcileNameAndOrganization(normalizedEntry));
+      return isUsableMappedSignupRow(sanitizedEntry) ? sanitizedEntry : null;
     })
     .filter((entry): entry is SignupEntry => entry !== null);
 }
