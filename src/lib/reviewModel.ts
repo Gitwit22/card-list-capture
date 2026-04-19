@@ -183,6 +183,68 @@ function buildRowsFromRawRows(rawRows: Array<Record<string, string>>, columns: R
   });
 }
 
+function getRawRowValueByPosition(rawRow: Record<string, string>, columnIndex: number): string {
+  const positionalCandidates = [
+    `c${columnIndex + 1}`,
+    `col${columnIndex + 1}`,
+    `column${columnIndex + 1}`,
+    `field${columnIndex + 1}`,
+  ];
+
+  for (const key of positionalCandidates) {
+    const direct = getExtraValue(rawRow, key);
+    if (direct) return direct;
+  }
+
+  // Last fallback: use object key order for positional rows.
+  const values = Object.values(rawRow).map((value) => String(value ?? ''));
+  return values[columnIndex] ?? '';
+}
+
+function getEntryBackedColumnValue(entry: SignupEntry | undefined, column: ReviewColumn): string {
+  if (!entry) return '';
+
+  if (column.canonical && column.canonicalKey) {
+    return String(entry[column.canonicalKey] ?? '');
+  }
+
+  const directExtraValue = getExtraValue(entry.extraFields ?? {}, column.sourceKey);
+  if (directExtraValue) return directExtraValue;
+
+  return getCanonicalValueByColumnLabel(entry, column.label);
+}
+
+function buildRowsFromMetaAndEntries(
+  rawRows: Array<Record<string, string>>,
+  entries: SignupEntry[],
+  columns: ReviewColumn[],
+): ReviewRow[] {
+  const maxRows = Math.max(rawRows.length, entries.length);
+  const rows: ReviewRow[] = [];
+
+  for (let index = 0; index < maxRows; index += 1) {
+    const rawRow = rawRows[index];
+    const entry = entries[index];
+    const values: Record<string, string> = {};
+
+    columns.forEach((column, columnIndex) => {
+      const entryValue = getEntryBackedColumnValue(entry, column);
+      const rawByLabel = rawRow ? getExtraValue(rawRow, column.sourceKey) : '';
+      const rawByPosition = rawRow ? getRawRowValueByPosition(rawRow, columnIndex) : '';
+
+      values[column.key] = rawByLabel || entryValue || rawByPosition || '';
+    });
+
+    rows.push({
+      id: entry?.id || rawRow?.id || `row-${index + 1}`,
+      values,
+      columns,
+    });
+  }
+
+  return rows;
+}
+
 export function buildSignupReviewModel(entries: SignupEntry[], meta?: ExtractionMeta): SignupReviewModel {
   const columns = getDynamicColumns(meta, entries);
   const rawRows = readRawRows(meta);
@@ -190,7 +252,7 @@ export function buildSignupReviewModel(entries: SignupEntry[], meta?: Extraction
   if (rawRows.length > 0) {
     return {
       columns,
-      rows: buildRowsFromRawRows(rawRows, columns),
+      rows: buildRowsFromMetaAndEntries(rawRows, entries, columns),
     };
   }
 

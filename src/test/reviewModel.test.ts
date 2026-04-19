@@ -113,6 +113,73 @@ describe('reviewModel', () => {
     expect(model.rows[0].values[deptColumn!.key]).toBe('Parsed Dept');
   });
 
+  it('binds values correctly when rawRows are positional keys and columns are header labels', () => {
+    const entries: SignupEntry[] = [
+      {
+        id: 'r1',
+        fullName: 'Robert DeBottille',
+        organization: 'Tetra Tech',
+        phone: '(810) 225-8404',
+        email: 'bob.debottill@tetratech.com',
+        screening: '',
+        shareInfo: '',
+        date: '',
+        comments: '',
+        extraFields: {
+          'ACCESS TO WEBSITE': 'Y',
+        },
+      },
+    ];
+
+    const model = buildSignupReviewModel(entries, {
+      structure: 'table',
+      detectedHeaders: ['NAME', 'ORGANIZATION', 'PHONE NUMBER', 'EMAIL ADDRESS', 'ACCESS TO WEBSITE?'],
+      headerMapping: [
+        { original: 'NAME', normalized: 'fullName' },
+        { original: 'ORGANIZATION', normalized: 'organization' },
+        { original: 'PHONE NUMBER', normalized: 'phone' },
+        { original: 'EMAIL ADDRESS', normalized: 'email' },
+        { original: 'ACCESS TO WEBSITE?', normalized: null },
+      ],
+      confidence: 0.92,
+      rawRows: [
+        {
+          c1: 'Robert DeBottille',
+          c2: 'Tetra Tech',
+          c3: '(810) 225-8404',
+          c4: 'bob.debottill@tetratech.com',
+          c5: 'Y',
+        },
+      ],
+    });
+
+    expect(model.columns.map((column) => column.label)).toEqual([
+      'NAME',
+      'ORGANIZATION',
+      'PHONE NUMBER',
+      'EMAIL ADDRESS',
+      'ACCESS TO WEBSITE?',
+    ]);
+
+    const nameColumn = model.columns.find((column) => column.label === 'NAME');
+    const orgColumn = model.columns.find((column) => column.label === 'ORGANIZATION');
+    const phoneColumn = model.columns.find((column) => column.label === 'PHONE NUMBER');
+    const emailColumn = model.columns.find((column) => column.label === 'EMAIL ADDRESS');
+    const accessColumn = model.columns.find((column) => column.label === 'ACCESS TO WEBSITE?');
+
+    expect(nameColumn).toBeDefined();
+    expect(orgColumn).toBeDefined();
+    expect(phoneColumn).toBeDefined();
+    expect(emailColumn).toBeDefined();
+    expect(accessColumn).toBeDefined();
+
+    expect(model.rows[0].values[nameColumn!.key]).toBe('Robert DeBottille');
+    expect(model.rows[0].values[orgColumn!.key]).toBe('Tetra Tech');
+    expect(model.rows[0].values[phoneColumn!.key]).toBe('(810) 225-8404');
+    expect(model.rows[0].values[emailColumn!.key]).toBe('bob.debottill@tetratech.com');
+    expect(model.rows[0].values[accessColumn!.key]).toBe('Y');
+  });
+
   it('falls back to canonical labels only when metadata is absent', () => {
     const entries: SignupEntry[] = [
       {
