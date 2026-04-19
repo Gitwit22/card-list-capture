@@ -6,10 +6,8 @@ import {
   ArrowLeft,
   Camera,
   CheckCircle2,
-  ChevronDown,
   Clock,
   CreditCard,
-  Download,
   FileSpreadsheet,
   History,
   Images,
@@ -23,6 +21,7 @@ import { Progress } from '@/components/ui/progress';
 import { cn } from '@/lib/utils';
 import { BusinessCardCaptureMode, ImageCapture, QueuedCapture } from '@/components/ImageCapture';
 import { DataReview } from '@/components/DataReview';
+import { ExportSidebar } from '@/components/ExportSidebar';
 import { ScanHistory } from '@/components/ScanHistory';
 import { ScanToSheetLoadingAnimation } from '@/components/ScanToSheetLoadingAnimation';
 import {
@@ -47,13 +46,6 @@ import { exportData, getExportColumns, type ExportFormat } from '@/lib/export';
 import { getScanHistory, saveScanRecord, getStorageStatus, clearStorageStatus } from '@/lib/storage';
 import { getSessionSettings, saveSessionSettings } from '@/lib/sessionSettings';
 import { isSafariPrivateMode, estimateSessionSize, formatBytes, shouldWarnAboutStoragePressure, cleanupObjectUrls } from '@/lib/storageUtils';
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu';
-import { Checkbox } from '@/components/ui/checkbox';
 import { toast } from 'sonner';
 
 type Step = 'home' | 'capture' | 'batch-queue' | 'processing' | 'batch-processing' | 'review' | 'history';
@@ -128,7 +120,13 @@ const Index = () => {
   const [isBatchProcessing, setIsBatchProcessing] = useState(false);
   const [singleCardDraft, setSingleCardDraft] = useState<BatchCardItem | null>(null);
   const [rapidPendingCardId, setRapidPendingCardId] = useState<string | null>(null);
-  const [exportFormat, setExportFormat] = useState<ExportFormat>('xlsx');
+  const [exportFormatSelection, setExportFormatSelection] = useState<Record<ExportFormat, boolean>>({
+    xlsx: true,
+    csv: false,
+    tsv: false,
+    json: false,
+    md: false,
+  });
   const [exportColumnSelection, setExportColumnSelection] = useState<Record<string, boolean>>({});
 
   const singleBackInputRef = useRef<HTMLInputElement | null>(null);
@@ -146,6 +144,13 @@ const Index = () => {
   const selectedExportColumns = useMemo(
     () => availableExportColumns.filter((column) => exportColumnSelection[column] !== false),
     [availableExportColumns, exportColumnSelection],
+  );
+
+  const selectedExportFormats = useMemo(
+    () => (Object.entries(exportFormatSelection) as Array<[ExportFormat, boolean]>)
+      .filter(([, included]) => included)
+      .map(([format]) => format),
+    [exportFormatSelection],
   );
 
   useEffect(() => {
@@ -546,7 +551,7 @@ const Index = () => {
     await processSingleCardDraft(nextDraft);
   };
 
-  const handleExport = (clearSessionAfter = false, format: ExportFormat = exportFormat) => {
+  const handleExport = (clearSessionAfter = false) => {
     if (data.length === 0) {
       toast.error('No data to export');
       return;
@@ -558,6 +563,11 @@ const Index = () => {
 
     if (exportRows.length === 0) {
       toast.error('No completed rows to export yet.');
+      return;
+    }
+
+    if (selectedExportFormats.length === 0) {
+      toast.error('Select at least one export file type.');
       return;
     }
 
@@ -582,10 +592,12 @@ const Index = () => {
       ? `business-cards-batch-${new Date().toISOString().slice(0, 10)}`
       : undefined;
 
-    exportData(typedData, docType, format, filename, extractionMeta, {
-      includeColumns: selectedExportColumns,
+    selectedExportFormats.forEach((format) => {
+      exportData(typedData, docType, format, filename, extractionMeta, {
+        includeColumns: selectedExportColumns,
+      });
     });
-    toast.success(`Exported ${format.toUpperCase()}!${clearSessionAfter ? ' Session cleared.' : ''}`);
+    toast.success(`Exported ${selectedExportFormats.map((format) => format.toUpperCase()).join(', ')}!${clearSessionAfter ? ' Session cleared.' : ''}`);
 
     if (clearSessionAfter) {
       clearSessionAfter ? reset() : undefined;
@@ -1090,143 +1102,86 @@ const Index = () => {
               </div>
             )}
 
-            {filePreviewUrl && (
-              <div className="rounded-lg overflow-hidden border border-border">
-                <img src={filePreviewUrl} alt="Scanned document" className="w-full max-h-48 object-contain bg-secondary" />
+            <div className="lg:grid lg:grid-cols-[minmax(0,1fr)_320px] lg:gap-6 lg:items-start space-y-6 lg:space-y-0">
+              <div className="space-y-6 min-w-0">
+                {filePreviewUrl && (
+                  <div className="rounded-lg overflow-hidden border border-border">
+                    <img src={filePreviewUrl} alt="Scanned document" className="w-full max-h-48 object-contain bg-secondary" />
+                  </div>
+                )}
+
+                <DataReview
+                  docType={docType}
+                  data={data}
+                  onChange={setData}
+                  meta={extractionMeta}
+                  businessCardFilter={businessCardFilter}
+                  onBusinessCardFilterChange={setBusinessCardFilter}
+                  onReviewProblemRows={() => setBusinessCardFilter('needs_review')}
+                  onRetryFailed={retryFailedFromReview}
+                  cardPreviewMap={cardPreviewMap}
+                />
               </div>
-            )}
 
-            <DataReview
-              docType={docType}
-              data={data}
-              onChange={setData}
-              meta={extractionMeta}
-              businessCardFilter={businessCardFilter}
-              onBusinessCardFilterChange={setBusinessCardFilter}
-              onReviewProblemRows={() => setBusinessCardFilter('needs_review')}
-              onRetryFailed={retryFailedFromReview}
-              cardPreviewMap={cardPreviewMap}
-            />
-
-            {docType === 'business-card' && (
-              <div className="rounded-md border border-border p-3 bg-card flex items-center justify-between">
-                <p className="text-sm text-muted-foreground">
-                  Ready to export: {(data as BusinessCardEntry[]).filter((row) => row.status !== 'failed').length} rows
-                </p>
-                <Button type="button" size="sm" variant="outline" onClick={retryFailedFromReview}>
-                  Retry Failed
-                </Button>
-              </div>
-            )}
-
-            <div className="flex justify-end">
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button type="button" variant="outline" size="sm">
-                    Format: {exportFormat.toUpperCase()}
-                    <ChevronDown className="w-4 h-4 ml-1" />
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end">
-                  <DropdownMenuItem onClick={() => setExportFormat('xlsx')}>Excel (.xlsx)</DropdownMenuItem>
-                  <DropdownMenuItem onClick={() => setExportFormat('csv')}>CSV (.csv)</DropdownMenuItem>
-                  <DropdownMenuItem onClick={() => setExportFormat('tsv')}>TSV (.tsv)</DropdownMenuItem>
-                  <DropdownMenuItem onClick={() => setExportFormat('json')}>JSON (.json)</DropdownMenuItem>
-                  <DropdownMenuItem onClick={() => setExportFormat('md')}>Markdown (.md)</DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
+              <ExportSidebar
+                exportFormatSelection={exportFormatSelection}
+                onToggleExportFormat={(format, included) => {
+                  setExportFormatSelection((prev) => ({
+                    ...prev,
+                    [format]: included,
+                  }));
+                }}
+                onSelectAllExportFormats={() => {
+                  setExportFormatSelection({ xlsx: true, csv: true, tsv: true, json: true, md: true });
+                }}
+                onClearAllExportFormats={() => {
+                  setExportFormatSelection({ xlsx: false, csv: false, tsv: false, json: false, md: false });
+                }}
+                availableExportColumns={availableExportColumns}
+                exportColumnSelection={exportColumnSelection}
+                onToggleColumn={(column, included) => {
+                  setExportColumnSelection((prev) => ({
+                    ...prev,
+                    [column]: included,
+                  }));
+                }}
+                onSelectAll={() => {
+                  setExportColumnSelection((prev) => {
+                    const next = { ...prev };
+                    availableExportColumns.forEach((column) => {
+                      next[column] = true;
+                    });
+                    return next;
+                  });
+                }}
+                onClearAll={() => {
+                  setExportColumnSelection((prev) => {
+                    const next = { ...prev };
+                    availableExportColumns.forEach((column) => {
+                      next[column] = false;
+                    });
+                    return next;
+                  });
+                }}
+                onReset={() => {
+                  setExportColumnSelection((prev) => {
+                    const next = { ...prev };
+                    availableExportColumns.forEach((column) => {
+                      next[column] = true;
+                    });
+                    return next;
+                  });
+                }}
+                onExport={() => handleExport()}
+                onExportAndClear={() => handleExport(true)}
+                readyCount={docType === 'business-card'
+                  ? (data as BusinessCardEntry[]).filter((row) => row.status !== 'failed').length
+                  : data.length}
+                exportDisabled={selectedExportColumns.length === 0 || selectedExportFormats.length === 0}
+                auxiliaryActionLabel={docType === 'business-card' ? 'Retry Failed' : undefined}
+                onAuxiliaryAction={docType === 'business-card' ? retryFailedFromReview : undefined}
+              />
             </div>
-
-            <div className="rounded-md border border-border p-3 bg-card space-y-3">
-              <div className="flex items-center justify-between gap-2">
-                <p className="text-sm font-medium text-foreground">Export Columns</p>
-                <p className="text-xs text-muted-foreground">{selectedExportColumns.length}/{availableExportColumns.length} selected</p>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="outline"
-                  onClick={() => {
-                    setExportColumnSelection((prev) => {
-                      const next = { ...prev };
-                      availableExportColumns.forEach((column) => {
-                        next[column] = true;
-                      });
-                      return next;
-                    });
-                  }}
-                >
-                  Select all
-                </Button>
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="outline"
-                  onClick={() => {
-                    setExportColumnSelection((prev) => {
-                      const next = { ...prev };
-                      availableExportColumns.forEach((column) => {
-                        next[column] = false;
-                      });
-                      return next;
-                    });
-                  }}
-                >
-                  Clear all
-                </Button>
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="outline"
-                  onClick={() => {
-                    setExportColumnSelection((prev) => {
-                      const next = { ...prev };
-                      availableExportColumns.forEach((column) => {
-                        next[column] = true;
-                      });
-                      return next;
-                    });
-                  }}
-                >
-                  Reset to detected
-                </Button>
-              </div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-48 overflow-auto pr-1">
-                {availableExportColumns.map((column) => (
-                  <label key={column} className="flex items-center gap-2 text-sm text-foreground">
-                    <Checkbox
-                      checked={exportColumnSelection[column] !== false}
-                      onCheckedChange={(checked) => {
-                        setExportColumnSelection((prev) => ({
-                          ...prev,
-                          [column]: Boolean(checked),
-                        }));
-                      }}
-                    />
-                    <span className="truncate">{column}</span>
-                  </label>
-                ))}
-              </div>
-            </div>
-
-            <Button
-              onClick={() => handleExport()}
-              disabled={selectedExportColumns.length === 0}
-              className="w-full scan-gradient scan-shadow h-12 text-primary-foreground font-medium"
-            >
-              <Download className="w-5 h-5 mr-2" />
-              Export to {exportFormat.toUpperCase()}
-            </Button>
-
-            <Button 
-              onClick={() => handleExport(true)} 
-              variant="outline" 
-              className="w-full h-11"
-            >
-              <Download className="w-5 h-5 mr-2" />
-              Export {exportFormat.toUpperCase()} and Clear Session
-            </Button>
           </div>
         )}
 

@@ -212,6 +212,8 @@ describe('extraction', () => {
       expect(card.phone).toBe('313-555-0147');
       expect(card.website).toBe('https://civicpartners.org');
       expect(card.address).toBe('123 Main St, Detroit, MI');
+      expect(card.firstName).toBe('Taylor');
+      expect(card.lastName).toBe('Brooks');
       expect(card.extraFields.Department).toBe('Outreach');
     });
 
@@ -242,9 +244,40 @@ describe('extraction', () => {
 
       const card = result.entries[0] as any;
       expect(card.fullName).toBe('Jordan Lee');
+      expect(card.firstName).toBe('Jordan');
+      expect(card.lastName).toBe('Lee');
       expect(card.company).toBe('Neighborhood Alliance');
       expect(card.phone).toBe('313-555-0172');
       expect(card.extraFields.Notes).toBe('Met at annual summit');
+    });
+
+    it('normalizes comma-separated card names into full, first, and last names', async () => {
+      const mockResponse = {
+        status: 'complete',
+        structure: 'single-entity',
+        detectedHeaders: ['Name', 'Email'],
+        headerMapping: [],
+        card: {
+          id: 'card-3',
+          name: 'Fair, Raymond',
+          email: 'info@communityclaim.com',
+          rawText: 'Fair, Raymond\ninfo@communityclaim.com',
+        },
+        confidence: 0.81,
+      };
+
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(mockResponse),
+      }));
+
+      const file = new File(['test'], 'card-comma-name.jpg', { type: 'image/jpeg' });
+      const result = await extractFromImage(file, 'business-card');
+
+      const card = result.entries[0] as any;
+      expect(card.fullName).toBe('Raymond Fair');
+      expect(card.firstName).toBe('Raymond');
+      expect(card.lastName).toBe('Fair');
     });
 
     it('maps sign-in response with extra unmapped fields', async () => {

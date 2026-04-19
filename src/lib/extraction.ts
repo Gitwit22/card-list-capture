@@ -1415,6 +1415,35 @@ function collectExtraFields(
   return extraFields;
 }
 
+function splitPersonName(fullName: string): { fullName: string; firstName: string; lastName: string } {
+  const normalized = asCleanString(fullName);
+  if (!normalized) {
+    return { fullName: '', firstName: '', lastName: '' };
+  }
+
+  const commaMatch = /^([^,]+),\s*(.+)$/.exec(normalized);
+  if (commaMatch) {
+    const lastName = asCleanString(commaMatch[1]);
+    const firstName = asCleanString(commaMatch[2]);
+    return {
+      fullName: `${firstName} ${lastName}`.trim(),
+      firstName,
+      lastName,
+    };
+  }
+
+  const parts = normalized.split(/\s+/).filter(Boolean);
+  if (parts.length === 1) {
+    return { fullName: normalized, firstName: parts[0], lastName: '' };
+  }
+
+  return {
+    fullName: normalized,
+    firstName: parts[0] ?? '',
+    lastName: parts.slice(1).join(' '),
+  };
+}
+
 function mapSignupRow(row: Record<string, unknown>): SignupEntry {
   const rowExtra = (row.extraFields ?? {}) as Record<string, unknown>;
   const mergedSource: Record<string, unknown> = {
@@ -1513,6 +1542,11 @@ function mapBusinessCard(card: Record<string, unknown>): BusinessCardEntry {
     || asCleanString(card.mailingAddress)
     || asCleanString(card.streetAddress);
 
+  const resolvedFullName = mapped.fullName || fallbackFullName || asCleanString([card.firstName, card.lastName].filter(Boolean).join(' '));
+  const splitName = splitPersonName(resolvedFullName);
+  const resolvedFirstName = asCleanString(card.firstName) || splitName.firstName;
+  const resolvedLastName = asCleanString(card.lastName) || splitName.lastName;
+
   const extraFields = collectExtraFields(mergedSource, usedKeys, [
     'id',
     'extrafields',
@@ -1524,9 +1558,9 @@ function mapBusinessCard(card: Record<string, unknown>): BusinessCardEntry {
 
   return {
     id: String(card.id ?? crypto.randomUUID()),
-    fullName: mapped.fullName || fallbackFullName,
-    firstName: asCleanString(card.firstName),
-    lastName: asCleanString(card.lastName),
+    fullName: splitName.fullName || resolvedFullName,
+    firstName: resolvedFirstName,
+    lastName: resolvedLastName,
     company: mapped.organization || fallbackCompany,
     title: mapped.jobTitle || fallbackTitle,
     phone: mapped.phone || fallbackPhone,
