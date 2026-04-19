@@ -280,6 +280,65 @@ describe('extraction', () => {
       expect(card.lastName).toBe('Fair');
     });
 
+    it('does not map surname-like company values from person name fragments', async () => {
+      const mockResponse = {
+        status: 'complete',
+        structure: 'single-entity',
+        detectedHeaders: ['Name', 'Company', 'Email'],
+        headerMapping: [],
+        card: {
+          id: 'card-4',
+          name: 'Fair, Raymond',
+          company: 'FAIR',
+          email: 'raymond@communityclaim.com',
+          rawText: 'Fair, Raymond\nFAIR\nraymond@communityclaim.com',
+        },
+        confidence: 0.8,
+      };
+
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(mockResponse),
+      }));
+
+      const file = new File(['test'], 'card-surname-company.jpg', { type: 'image/jpeg' });
+      const result = await extractFromImage(file, 'business-card');
+
+      const card = result.entries[0] as any;
+      expect(card.fullName).toBe('Raymond Fair');
+      expect(card.lastName).toBe('Fair');
+      expect(card.company).toBe('');
+    });
+
+    it('keeps valid company names when supported by company/domain signals', async () => {
+      const mockResponse = {
+        status: 'complete',
+        structure: 'single-entity',
+        detectedHeaders: ['Name', 'Company', 'Email', 'Website'],
+        headerMapping: [],
+        card: {
+          id: 'card-5',
+          name: 'Raymond Fair',
+          company: 'Community Claim Solutions',
+          email: 'raymond@communityclaim.com',
+          website: 'https://communityclaim.com',
+          rawText: 'Raymond Fair\nCommunity Claim Solutions',
+        },
+        confidence: 0.83,
+      };
+
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(mockResponse),
+      }));
+
+      const file = new File(['test'], 'card-valid-company.jpg', { type: 'image/jpeg' });
+      const result = await extractFromImage(file, 'business-card');
+
+      const card = result.entries[0] as any;
+      expect(card.company).toBe('Community Claim Solutions');
+    });
+
     it('maps sign-in response with extra unmapped fields', async () => {
       const mockResponse = {
         status: 'complete',

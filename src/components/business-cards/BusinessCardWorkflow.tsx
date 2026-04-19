@@ -34,7 +34,11 @@ import {
   extractBusinessCardRecord,
   getDefaultBatchConcurrency,
 } from '@/lib/extraction';
-import { exportData, getExportColumns, type ExportFormat } from '@/lib/export';
+import {
+  exportData,
+  getBusinessCardExportColumnGroups,
+  type ExportFormat,
+} from '@/lib/export';
 import { toast } from 'sonner';
 
 type Step = 'capture' | 'batch-queue' | 'processing' | 'batch-processing' | 'review';
@@ -92,10 +96,18 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
     md: false,
   });
   const [exportColumnSelection, setExportColumnSelection] = useState<Record<string, boolean>>({});
+  const [showAdvancedExportColumns, setShowAdvancedExportColumns] = useState(false);
+
+  const exportColumnGroups = useMemo(
+    () => getBusinessCardExportColumnGroups(data),
+    [data],
+  );
 
   const availableExportColumns = useMemo(
-    () => getExportColumns(data, 'business-card'),
-    [data],
+    () => showAdvancedExportColumns
+      ? [...exportColumnGroups.defaultColumns, ...exportColumnGroups.advancedColumns]
+      : exportColumnGroups.defaultColumns,
+    [showAdvancedExportColumns, exportColumnGroups],
   );
 
   const selectedExportColumns = useMemo(
@@ -113,12 +125,12 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
   useEffect(() => {
     setExportColumnSelection((prev) => {
       const next: Record<string, boolean> = {};
-      availableExportColumns.forEach((column) => {
-        next[column] = prev[column] ?? true;
+      exportColumnGroups.allColumns.forEach((column) => {
+        next[column] = prev[column] ?? exportColumnGroups.defaultColumns.includes(column);
       });
       return next;
     });
-  }, [availableExportColumns]);
+  }, [exportColumnGroups]);
 
   // ── Session persistence ───────────────────────────────────────────────────
   const sessionIdRef = useRef<string>(crypto.randomUUID());
@@ -1090,17 +1102,17 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
                 onReset={() => {
                   setExportColumnSelection((prev) => {
                     const next = { ...prev };
-                    availableExportColumns.forEach((column) => {
-                      next[column] = true;
+                    exportColumnGroups.allColumns.forEach((column) => {
+                      next[column] = exportColumnGroups.defaultColumns.includes(column);
                     });
                     return next;
                   });
                 }}
+                showAdvancedColumns={showAdvancedExportColumns}
+                onToggleAdvancedColumns={setShowAdvancedExportColumns}
                 onExport={() => handleExport()}
                 readyCount={data.filter((row) => row.status !== 'failed').length}
                 exportDisabled={selectedExportColumns.length === 0 || selectedExportFormats.length === 0}
-                auxiliaryActionLabel="Retry Failed"
-                onAuxiliaryAction={retryFailedFromReview}
               />
             </div>
           </div>

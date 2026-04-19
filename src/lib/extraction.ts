@@ -623,6 +623,7 @@ const SIGNUP_FIELD_MAP: Record<SignupCanonicalField, string[]> = {
 const SIGNUP_ROW_IGNORE_KEYS = new Set(['id', 'extrafields', 'metadata', 'meta', 'region', 'sheet']);
 
 const ORGANIZATION_HINTS = /\b(llc|inc|corp|co|company|agency|group|foundation|ministries|ministry|church|university|college|school|hospital|center|centre|services|network|association|institute)\b/i;
+const BUSINESS_CARD_COMPANY_HINTS = /\b(llc|l\.l\.c\.|inc|inc\.|corp|corporation|co\.?|company|group|agency|services|solutions|clinic|firm|partners|studio|consulting|systems|associates)\b/i;
 
 function isLikelyNameValue(value: string): boolean {
   const trimmed = value.trim();
@@ -1444,6 +1445,90 @@ function splitPersonName(fullName: string): { fullName: string; firstName: strin
   };
 }
 
+function normalizeToken(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function getPersonNameTokens(value: string): string[] {
+  return value
+    .split(/\s+/)
+    .map((token) => normalizeToken(token))
+    .filter((token) => token.length >= 2);
+}
+
+function getDomainRootHint(email: string, website: string): string {
+  const normalizedWebsite = website.trim();
+  const normalizedEmail = email.trim().toLowerCase();
+
+  const fromEmail = normalizedEmail.includes('@')
+    ? normalizedEmail.split('@')[1] ?? ''
+    : '';
+  const fromWebsite = normalizedWebsite
+    .replace(/^https?:\/\//i, '')
+    .replace(/^www\./i, '')
+    .split('/')[0] ?? '';
+
+  const host = fromWebsite || fromEmail;
+  if (!host) return '';
+
+  const parts = host.split('.').filter(Boolean);
+  if (parts.length < 2) return normalizeToken(host);
+  return normalizeToken(parts[parts.length - 2] ?? '');
+}
+
+function hasStrongNameOverlap(candidate: string, splitName: { firstName: string; lastName: string; fullName: string }): boolean {
+  const personTokens = new Set(getPersonNameTokens(splitName.fullName));
+  const candidateTokens = getPersonNameTokens(candidate);
+
+  if (candidateTokens.length === 0 || personTokens.size === 0) return false;
+
+  const overlap = candidateTokens.filter((token) => personTokens.has(token));
+  const overlapRatio = overlap.length / candidateTokens.length;
+  if (overlapRatio >= 0.6) return true;
+
+  const normalizedCandidate = normalizeToken(candidate);
+  const normalizedLast = normalizeToken(splitName.lastName);
+  if (normalizedLast && normalizedCandidate === normalizedLast) return true;
+
+  return false;
+}
+
+function resolveBusinessCardCompany(
+  candidates: string[],
+  splitName: { firstName: string; lastName: string; fullName: string },
+  email: string,
+  website: string,
+): string {
+  const domainRootHint = getDomainRootHint(email, website);
+
+  const scored = candidates
+    .map((rawValue) => asCleanString(rawValue))
+    .filter(Boolean)
+    .map((value) => {
+      const normalizedValue = normalizeToken(value);
+      const overlapsName = hasStrongNameOverlap(value, splitName);
+      const hasCompanyHint = BUSINESS_CARD_COMPANY_HINTS.test(value);
+      const domainAligned = Boolean(domainRootHint)
+        && (normalizedValue.includes(domainRootHint) || domainRootHint.includes(normalizedValue));
+
+      let score = 0;
+      if (hasCompanyHint) score += 3;
+      if (domainAligned) score += 2;
+      if (value.split(/\s+/).length >= 2) score += 1;
+      if (value.split(/\s+/).length === 1 && normalizedValue.length >= 4) score += 1;
+      if (overlapsName) score -= 6;
+
+      return { value, score, overlapsName };
+    })
+    .sort((a, b) => b.score - a.score);
+
+  const best = scored[0];
+  if (!best) return '';
+  if (best.overlapsName) return '';
+  if (best.score <= 0) return '';
+  return best.value;
+}
+
 function mapSignupRow(row: Record<string, unknown>): SignupEntry {
   const rowExtra = (row.extraFields ?? {}) as Record<string, unknown>;
   const mergedSource: Record<string, unknown> = {
@@ -1544,8 +1629,16 @@ function mapBusinessCard(card: Record<string, unknown>): BusinessCardEntry {
 
   const resolvedFullName = mapped.fullName || fallbackFullName || asCleanString([card.firstName, card.lastName].filter(Boolean).join(' '));
   const splitName = splitPersonName(resolvedFullName);
-  const resolvedFirstName = asCleanString(card.firstName) || splitName.firstName;
-  const resolvedLastName = asCleanString(card.lastName) || splitName.lastName;
+  const extractedFirstName = asCleanString(card.firstName);
+  const extractedLastName = asCleanString(card.lastName);
+  const resolvedFirstName = extractedFirstName || splitName.firstName;
+  const resolvedLastName = extractedLastName || splitName.lastName;
+  const resolvedCompany = resolveBusinessCardCompany(
+    [mapped.organization, fallbackCompany],
+    splitName,
+    mapped.email || fallbackEmail,
+    mapped.website || fallbackWebsite,
+  );
 
   const extraFields = collectExtraFields(mergedSource, usedKeys, [
     'id',
@@ -1561,13 +1654,15 @@ function mapBusinessCard(card: Record<string, unknown>): BusinessCardEntry {
     fullName: splitName.fullName || resolvedFullName,
     firstName: resolvedFirstName,
     lastName: resolvedLastName,
-    company: mapped.organization || fallbackCompany,
+    namePartsExtracted: Boolean(extractedFirstName || extractedLastName),
+    company: resolvedCompany,
     title: mapped.jobTitle || fallbackTitle,
     phone: mapped.phone || fallbackPhone,
     email: mapped.email || fallbackEmail,
     website: mapped.website || fallbackWebsite,
     address: mapped.address || fallbackAddress,
     social: asCleanString(card.social),
+    comment: asCleanString(card.comment),
     extraFields,
     rawText: asCleanString(card.rawText),
   };
@@ -1601,6 +1696,7 @@ export function createEmptyBusinessCard(): BusinessCardEntry {
     website: '',
     address: '',
     social: '',
+    comment: '',
     extraFields: {},
     rawText: '',
   };

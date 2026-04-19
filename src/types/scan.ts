@@ -18,6 +18,7 @@ export interface BusinessCardEntry {
   fullName: string;
   firstName: string;
   lastName: string;
+  namePartsExtracted?: boolean;
   company: string;
   title: string;
   phone: string;
@@ -37,6 +38,7 @@ export interface BusinessCardEntry {
   status?: 'complete' | 'needs_review' | 'failed';
   error?: string;
   social: string;
+  comment?: string;
   extraFields: Record<string, string>;
   rawText: string;
 }

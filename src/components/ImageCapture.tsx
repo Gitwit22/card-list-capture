@@ -20,6 +20,7 @@ export interface QueuedCapture {
 
 interface ImageCaptureProps {
   onImageSelected: (file: File, previewUrl: string, sourceType?: 'camera' | 'upload') => void;
+  onMultipleImagesSelected?: (files: File[], sourceType?: 'camera' | 'upload') => void;
   mode?: BusinessCardCaptureMode;
   onBatchAdd?: (captures: QueuedCapture[]) => void;
   capturedCount?: number;
@@ -55,6 +56,7 @@ function FilePreview({ file, previewUrl }: { file: File; previewUrl: string | nu
 
 export function ImageCapture({
   onImageSelected,
+  onMultipleImagesSelected,
   mode = 'single',
   onBatchAdd,
   capturedCount = 0,
@@ -102,6 +104,38 @@ export function ImageCapture({
     onImageSelected(file, url ?? '', sourceType);
   }, [isLikelyImageFile, onImageSelected]);
 
+  const handleSingleFiles = useCallback((files: FileList | File[], sourceType: 'camera' | 'upload') => {
+    const list = Array.from(files);
+    if (list.length === 0) return;
+
+    if (mode === 'single' && onMultipleImagesSelected && list.length > 1) {
+      const validFiles: File[] = [];
+
+      list.forEach((file) => {
+        const result = validateFile(file);
+        if (!result.valid) {
+          toast.error(`${file.name}: ${result.error}`);
+          return;
+        }
+
+        validFiles.push(file);
+      });
+
+      if (validFiles.length === 0) return;
+
+      if (preview) {
+        URL.revokeObjectURL(preview);
+      }
+      setPreview(null);
+      setSelectedFile(null);
+
+      onMultipleImagesSelected(validFiles, sourceType);
+      return;
+    }
+
+    handleSingleFile(list[0], sourceType);
+  }, [handleSingleFile, mode, onMultipleImagesSelected, preview]);
+
   const queueFiles = useCallback((files: FileList | File[], sourceType: 'camera' | 'upload') => {
     const valid: QueuedCapture[] = [];
 
@@ -124,13 +158,14 @@ export function ImageCapture({
     setDragOver(false);
 
     if (mode === 'single') {
-      const file = e.dataTransfer.files[0];
-      if (file) handleSingleFile(file, 'upload');
+      if (e.dataTransfer.files.length > 0) {
+        handleSingleFiles(e.dataTransfer.files, 'upload');
+      }
       return;
     }
 
     queueFiles(e.dataTransfer.files, 'upload');
-  }, [handleSingleFile, mode, queueFiles]);
+  }, [handleSingleFiles, mode, queueFiles]);
 
   const clear = () => {
     if (preview) URL.revokeObjectURL(preview);
@@ -214,10 +249,13 @@ export function ImageCapture({
                 <input
                   type="file"
                   accept={acceptStr}
+                  multiple
                   className="hidden"
                   onChange={(e) => {
-                    const file = e.target.files?.[0];
-                    if (file) handleSingleFile(file, 'upload');
+                    if (e.target.files?.length) {
+                      handleSingleFiles(e.target.files, 'upload');
+                    }
+                    e.currentTarget.value = '';
                   }}
                 />
               </label>

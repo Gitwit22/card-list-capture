@@ -26,6 +26,8 @@ interface ExportSidebarProps {
   onExportAndClear?: () => void;
   readyCount: number;
   exportDisabled?: boolean;
+  showAdvancedColumns?: boolean;
+  onToggleAdvancedColumns?: (enabled: boolean) => void;
   auxiliaryActionLabel?: string;
   onAuxiliaryAction?: () => void;
 }
@@ -45,6 +47,8 @@ export function ExportSidebar({
   onExportAndClear,
   readyCount,
   exportDisabled = false,
+  showAdvancedColumns = false,
+  onToggleAdvancedColumns,
   auxiliaryActionLabel,
   onAuxiliaryAction,
 }: ExportSidebarProps) {
@@ -112,6 +116,16 @@ export function ExportSidebar({
           <Button type="button" size="sm" variant="outline" onClick={onReset}>
             Reset to detected
           </Button>
+          {onToggleAdvancedColumns && (
+            <Button
+              type="button"
+              size="sm"
+              variant={showAdvancedColumns ? 'default' : 'outline'}
+              onClick={() => onToggleAdvancedColumns(!showAdvancedColumns)}
+            >
+              {showAdvancedColumns ? 'Hide Advanced' : 'Show Advanced'}
+            </Button>
+          )}
         </div>
 
         <div className="grid grid-cols-1 gap-2 max-h-64 overflow-auto pr-1">

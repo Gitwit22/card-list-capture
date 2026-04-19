@@ -8,6 +8,12 @@ export interface ExportOptions {
   includeColumns?: string[];
 }
 
+export interface ExportColumnGroups {
+  allColumns: string[];
+  defaultColumns: string[];
+  advancedColumns: string[];
+}
+
 interface ExportPayload {
   rows: Record<string, string>[];
   defaultName: string;
@@ -61,6 +67,7 @@ function getExportPayload(
       'Website': normalizeCellValue(entry.website),
       'Address': normalizeCellValue(entry.address),
       'Social': normalizeCellValue(entry.social),
+      'Comment': normalizeCellValue(entry.comment || ''),
       'Source': normalizeCellValue(entry.sourceLabel || ''),
       'Source Card Id': normalizeCellValue(entry.sourceCardId || entry.sourceItemId || ''),
       'Has Back': entry.hasBack ? 'yes' : 'no',
@@ -103,6 +110,59 @@ export function getExportColumns(
   });
 
   return columns;
+}
+
+const CORE_BUSINESS_CARD_COLUMNS = new Set([
+  'Full Name',
+  'Company',
+  'Title',
+  'Phone',
+  'Email',
+  'Website',
+  'Address',
+  'Social',
+  'Comment',
+]);
+
+const ADVANCED_BUSINESS_CARD_COLUMNS = new Set([
+  'Source',
+  'Source Card Id',
+  'Has Back',
+  'Capture Type',
+  'Status',
+  'Conflict Fields',
+  'Back Text',
+  'serviceTags',
+]);
+
+function getDetectedColumns(rows: Record<string, string>[]): Set<string> {
+  const detected = new Set<string>();
+  rows.forEach((row) => {
+    Object.entries(row).forEach(([column, value]) => {
+      if (String(value ?? '').trim().length > 0) {
+        detected.add(column);
+      }
+    });
+  });
+  return detected;
+}
+
+export function getBusinessCardExportColumnGroups(data: BusinessCardEntry[]): ExportColumnGroups {
+  const { rows } = getExportPayload(data, 'business-card');
+  const allColumns = getExportColumns(data, 'business-card');
+  const detected = getDetectedColumns(rows);
+
+  const advancedColumns = allColumns.filter((column) => ADVANCED_BUSINESS_CARD_COLUMNS.has(column));
+  const defaultColumns = allColumns.filter((column) => {
+    if (ADVANCED_BUSINESS_CARD_COLUMNS.has(column)) return false;
+    return CORE_BUSINESS_CARD_COLUMNS.has(column) || detected.has(column);
+  });
+
+  return {
+    allColumns,
+    defaultColumns,
+    advancedColumns,
+  };
 }
 
 function filterRowsByColumns(rows: Record<string, string>[], includeColumns?: string[]): Record<string, string>[] {

@@ -105,6 +105,37 @@ function inferPairKey(filename?: string): string | null {
   return cleaned || null;
 }
 
+function mergeSignupExtractionMeta(metas: ExtractionMeta[]): ExtractionMeta | undefined {
+  if (metas.length === 0) return undefined;
+
+  const detectedHeaders = Array.from(new Set(metas.flatMap((meta) => meta.detectedHeaders ?? [])));
+  const mappingByOriginal = new Map<string, ExtractionMeta['headerMapping'][number]>();
+
+  metas.forEach((meta) => {
+    (meta.headerMapping ?? []).forEach((mapping) => {
+      if (!mappingByOriginal.has(mapping.original)) {
+        mappingByOriginal.set(mapping.original, mapping);
+      }
+    });
+  });
+
+  const rawRows = metas.flatMap((meta) => meta.rawRows ?? []);
+  const confidence = metas.reduce((total, meta) => total + (meta.confidence ?? 0), 0) / metas.length;
+  const structure = metas.some((meta) => meta.structure === 'table')
+    ? 'table'
+    : metas.some((meta) => meta.structure === 'single-entity')
+      ? 'single-entity'
+      : 'unstructured';
+
+  return {
+    structure,
+    detectedHeaders,
+    headerMapping: Array.from(mappingByOriginal.values()),
+    confidence,
+    rawRows: rawRows.length > 0 ? rawRows : undefined,
+  };
+}
+
 const Index = () => {
   const navigate = useNavigate();
   const [step, setStep] = useState<Step>('home');
@@ -532,6 +563,51 @@ const Index = () => {
     }
   };
 
+  const handleSignupSheetsSelected = useCallback(async (files: File[], sourceType: 'camera' | 'upload' = 'upload') => {
+    if (files.length === 0) return;
+
+    setFilePreviewUrl('');
+    setStep('processing');
+
+    const allEntries: SignupEntry[] = [];
+    const metas: ExtractionMeta[] = [];
+    const failedFiles: string[] = [];
+
+    for (const file of files) {
+      const previewUrl = sourceType === 'upload' ? URL.createObjectURL(file) : '';
+
+      try {
+        const result = await extractFromImage(file, 'signup-sheet');
+        allEntries.push(...(result.entries as SignupEntry[]));
+        metas.push(result.meta);
+      } catch {
+        failedFiles.push(file.name);
+      } finally {
+        if (previewUrl) {
+          URL.revokeObjectURL(previewUrl);
+        }
+      }
+    }
+
+    if (allEntries.length === 0) {
+      toast.error('Failed to extract data from selected sign-up sheets. Please try again.');
+      setStep('capture');
+      return;
+    }
+
+    setData(allEntries);
+    setExtractionMeta(mergeSignupExtractionMeta(metas));
+    setBusinessCardFilter('all');
+    setStep('review');
+
+    if (failedFiles.length > 0) {
+      toast.warning(`Extracted ${allEntries.length} entries from ${files.length - failedFiles.length} of ${files.length} sheets.`);
+      return;
+    }
+
+    toast.info(`Data extracted (${allEntries.length} ${allEntries.length === 1 ? 'entry' : 'entries'}) from ${files.length} sheet${files.length === 1 ? '' : 's'} - please review before exporting.`);
+  }, []);
+
   const handleSingleBackSelected = async (file: File) => {
     if (!singleCardDraft) return;
 
@@ -782,7 +858,7 @@ const Index = () => {
               </h2>
               <p className="text-sm text-muted-foreground mt-1">
                 {docType === 'signup-sheet'
-                  ? 'Take a photo or upload a file (image, PDF, Excel, Word, etc.).'
+                  ? 'Take a photo or upload one or more files (image, PDF, Excel, Word, etc.).'
                   : 'Capture business cards as front + optional back records.'}
               </p>
             </div>
@@ -813,6 +889,7 @@ const Index = () => {
 
             <ImageCapture
               onImageSelected={handleImageSelected}
+              onMultipleImagesSelected={docType === 'signup-sheet' ? handleSignupSheetsSelected : undefined}
               mode={docType === 'business-card' ? captureMode : 'single'}
               onBatchAdd={docType === 'business-card' ? addCapturesToQueue : undefined}
               capturedCount={activeBatchCount}
@@ -1072,7 +1149,9 @@ const Index = () => {
             <div>
               <h2 className="text-xl font-semibold text-foreground">Review & Edit</h2>
               <p className="text-sm text-muted-foreground mt-1">
-                One row per card. Front/back data is merged for export.
+                {docType === 'business-card'
+                  ? 'One row per card. Front/back data is merged for export.'
+                  : 'Rows from all selected sign-up sheets are combined for one review and export.'}
               </p>
             </div>
 

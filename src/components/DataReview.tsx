@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
 import { SignupEntry, BusinessCardEntry, DocumentType, ExtractionMeta } from '@/types/scan';
 import { Input } from '@/components/ui/input';
+import { Textarea } from '@/components/ui/textarea';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Trash2, Plus, ChevronDown, ChevronRight } from 'lucide-react';
@@ -33,7 +34,29 @@ export function DataReview({
   cardPreviewMap,
 }: DataReviewProps) {
   const [showExtras, setShowExtras] = useState<Record<string, boolean>>({});
+  const [showNameParts, setShowNameParts] = useState<Record<string, boolean>>({});
+  const [showComments, setShowComments] = useState<Record<string, boolean>>({});
   const [showDebug, setShowDebug] = useState(false);
+
+  const splitNameForUi = (value: string): { firstName: string; lastName: string } => {
+    const normalized = String(value ?? '').trim();
+    if (!normalized) return { firstName: '', lastName: '' };
+    const commaMatch = /^([^,]+),\s*(.+)$/.exec(normalized);
+    if (commaMatch) {
+      return {
+        firstName: String(commaMatch[2] ?? '').trim(),
+        lastName: String(commaMatch[1] ?? '').trim(),
+      };
+    }
+
+    const parts = normalized.split(/\s+/).filter(Boolean);
+    if (parts.length <= 1) return { firstName: parts[0] ?? '', lastName: '' };
+
+    return {
+      firstName: parts[0] ?? '',
+      lastName: parts.slice(1).join(' '),
+    };
+  };
 
   const getOriginalIndex = (id: string) => data.findIndex((entry) => entry.id === id);
 
@@ -81,22 +104,9 @@ export function DataReview({
     return buildSignupReviewModel(signupEntries, meta);
   }, [docType, signupEntries, meta]);
 
-  const cardFields = [
-    { key: 'fullName', label: 'Full Name' },
-    { key: 'firstName', label: 'First Name' },
-    { key: 'lastName', label: 'Last Name' },
-    { key: 'company', label: 'Company' },
-    { key: 'title', label: 'Title' },
-    { key: 'phone', label: 'Phone' },
-    { key: 'email', label: 'Email' },
-    { key: 'website', label: 'Website' },
-    { key: 'address', label: 'Address' },
-    { key: 'social', label: 'Social' },
-  ];
-
   const fields = docType === 'signup-sheet'
     ? (signupReviewModel?.columns ?? [])
-    : cardFields;
+    : [];
 
   const filteredData = docType === 'business-card'
     ? (data as BusinessCardEntry[]).filter((entry) => {
@@ -151,7 +161,7 @@ export function DataReview({
 
       {docType === 'business-card' && (
         <div className="space-y-3">
-          <div className="flex flex-wrap gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             {filterButtons.map((filter) => (
               <Button
                 key={filter.value}
@@ -163,12 +173,7 @@ export function DataReview({
                 {filter.label}
               </Button>
             ))}
-          </div>
-          <div className="flex flex-wrap gap-2">
-            <Button type="button" size="sm" variant="outline" onClick={onReviewProblemRows}>
-              Review Problem Rows
-            </Button>
-            <Button type="button" size="sm" variant="outline" onClick={onRetryFailed}>
+            <Button type="button" size="sm" variant="ghost" onClick={onRetryFailed}>
               Retry Failed
             </Button>
           </div>
@@ -198,7 +203,7 @@ export function DataReview({
       <div className="space-y-3">
         {filteredData.map((entry, index) => {
           const extras = (entry as SignupEntry | BusinessCardEntry).extraFields ?? {};
-          const hasExtras = docType !== 'signup-sheet' && Object.keys(extras).length > 0;
+          const hasExtras = Object.keys(extras).length > 0;
 
           return (
             <div key={entry.id} className="bg-card rounded-lg border border-border p-4 card-shadow">
@@ -274,30 +279,153 @@ export function DataReview({
                 );
               })()}
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                {fields.map((field) => (
-                  <div key={field.key}>
-                    <label className="text-xs font-medium text-muted-foreground mb-1 block">{field.label}</label>
-                    <Input
-                      value={docType === 'signup-sheet'
-                        ? (signupReviewModel?.rows.find((row) => row.id === entry.id)?.values[field.key] || '')
-                        : ((entry as Record<string, string>)[field.key] || '')}
-                      onChange={(e) => {
-                        if (docType === 'signup-sheet' && !field.canonical) {
-                          updateExtraField(entry.id, field.sourceKey || field.label, e.target.value);
-                          return;
-                        }
+              {docType === 'signup-sheet' ? (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  {fields.map((field) => (
+                    <div key={field.key}>
+                      <label className="text-xs font-medium text-muted-foreground mb-1 block">{field.label}</label>
+                      <Input
+                        value={signupReviewModel?.rows.find((row) => row.id === entry.id)?.values[field.key] || ''}
+                        onChange={(e) => {
+                          if (!field.canonical) {
+                            updateExtraField(entry.id, field.sourceKey || field.label, e.target.value);
+                            return;
+                          }
 
-                        updateField(entry.id, field.key, e.target.value);
-                      }}
-                      placeholder={field.label}
-                      className="h-9 text-sm"
-                    />
-                  </div>
-                ))}
-              </div>
+                          updateField(entry.id, field.key, e.target.value);
+                        }}
+                        placeholder={field.label}
+                        className="h-9 text-sm"
+                      />
+                    </div>
+                  ))}
+                </div>
+              ) : (() => {
+                const cardEntry = entry as BusinessCardEntry;
+                const extrasCount = Object.keys(extras).length;
+                const splitNameVisible = Boolean(showNameParts[entry.id] || cardEntry.namePartsExtracted);
+                const commentVisible = Boolean(showComments[entry.id] || String(cardEntry.comment ?? '').trim());
+                const hasMoreFields = splitNameVisible || extrasCount > 0;
 
-              {hasExtras && (
+                return (
+                  <>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      {[
+                        { key: 'fullName', label: 'Full Name' },
+                        { key: 'company', label: 'Company' },
+                        { key: 'title', label: 'Title' },
+                        { key: 'phone', label: 'Phone' },
+                        { key: 'email', label: 'Email' },
+                        { key: 'website', label: 'Website' },
+                        { key: 'address', label: 'Address' },
+                        { key: 'social', label: 'Social' },
+                      ].map((field) => (
+                        <div key={field.key}>
+                          <label className="text-xs font-medium text-muted-foreground mb-1 block">{field.label}</label>
+                          <Input
+                            value={(cardEntry as Record<string, string>)[field.key] || ''}
+                            onChange={(e) => updateField(entry.id, field.key, e.target.value)}
+                            placeholder={field.label}
+                            className="h-9 text-sm"
+                          />
+                        </div>
+                      ))}
+                    </div>
+
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        onClick={() => {
+                          const next = !showNameParts[entry.id];
+                          setShowNameParts((prev) => ({ ...prev, [entry.id]: next }));
+                          if (next && !cardEntry.firstName && !cardEntry.lastName) {
+                            const split = splitNameForUi(cardEntry.fullName);
+                            if (split.firstName) updateField(entry.id, 'firstName', split.firstName);
+                            if (split.lastName) updateField(entry.id, 'lastName', split.lastName);
+                          }
+                        }}
+                      >
+                        {splitNameVisible ? 'Hide Name Parts' : 'Split Name'}
+                      </Button>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        onClick={() => setShowComments((prev) => ({ ...prev, [entry.id]: !prev[entry.id] }))}
+                      >
+                        {commentVisible ? 'Hide Comment' : 'Add Comment'}
+                      </Button>
+                    </div>
+
+                    {commentVisible && (
+                      <div className="mt-3">
+                        <label className="text-xs font-medium text-muted-foreground mb-1 block">Comment</label>
+                        <Textarea
+                          value={cardEntry.comment || ''}
+                          onChange={(e) => updateField(entry.id, 'comment', e.target.value)}
+                          placeholder="Add a note for this entry"
+                          className="min-h-[88px] text-sm"
+                        />
+                      </div>
+                    )}
+
+                    {hasMoreFields && (
+                      <div className="mt-3">
+                        <button
+                          onClick={() => toggleExtras(entry.id)}
+                          className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+                        >
+                          {showExtras[entry.id] ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
+                          More fields
+                          {extrasCount > 0 ? ` (${extrasCount})` : ''}
+                        </button>
+
+                        {showExtras[entry.id] && (
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-2 pl-2 border-l-2 border-yellow-500/30">
+                            {splitNameVisible && (
+                              <>
+                                <div>
+                                  <label className="text-xs font-medium text-muted-foreground mb-1 block">First Name</label>
+                                  <Input
+                                    value={cardEntry.firstName || ''}
+                                    onChange={(e) => updateField(entry.id, 'firstName', e.target.value)}
+                                    placeholder="First Name"
+                                    className="h-9 text-sm"
+                                  />
+                                </div>
+                                <div>
+                                  <label className="text-xs font-medium text-muted-foreground mb-1 block">Last Name</label>
+                                  <Input
+                                    value={cardEntry.lastName || ''}
+                                    onChange={(e) => updateField(entry.id, 'lastName', e.target.value)}
+                                    placeholder="Last Name"
+                                    className="h-9 text-sm"
+                                  />
+                                </div>
+                              </>
+                            )}
+
+                            {Object.entries(extras).map(([key, value]) => (
+                              <div key={key}>
+                                <label className="text-xs font-medium text-yellow-600 mb-1 block">{key}</label>
+                                <Input
+                                  value={value}
+                                  onChange={(e) => updateExtraField(entry.id, key, e.target.value)}
+                                  placeholder={key}
+                                  className="h-9 text-sm"
+                                />
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </>
+                );
+              })()}
+              {hasExtras && docType === 'signup-sheet' && (
                 <div className="mt-3">
                   <button
                     onClick={() => toggleExtras(entry.id)}
