@@ -1102,8 +1102,8 @@ const Index = () => {
               </div>
             )}
 
-            <div className="lg:grid lg:grid-cols-[minmax(0,1fr)_320px] lg:gap-6 lg:items-start space-y-6 lg:space-y-0">
-              <div className="space-y-6 min-w-0">
+            <div className="grid grid-cols-1 gap-6 min-[1200px]:grid-cols-[minmax(720px,1fr)_340px] min-[1200px]:items-start min-[1200px]:gap-8">
+              <div className="min-w-0 space-y-6">
                 {filePreviewUrl && (
                   <div className="rounded-lg overflow-hidden border border-border">
                     <img src={filePreviewUrl} alt="Scanned document" className="w-full max-h-48 object-contain bg-secondary" />

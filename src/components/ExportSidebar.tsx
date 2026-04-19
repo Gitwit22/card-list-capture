@@ -52,7 +52,7 @@ export function ExportSidebar({
   const selectedFormats = EXPORT_FORMAT_OPTIONS.filter(({ format }) => exportFormatSelection[format] !== false);
 
   return (
-    <aside className="lg:sticky lg:top-24 h-fit space-y-4">
+    <aside className="w-full h-fit space-y-4 min-[1200px]:sticky min-[1200px]:top-24 min-[1200px]:w-[340px] min-[1200px]:justify-self-end">
       <div className="rounded-lg border border-border bg-card p-4 space-y-4">
         <div className="space-y-1">
           <p className="text-sm font-medium text-foreground">Export</p>

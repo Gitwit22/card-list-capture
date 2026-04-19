@@ -7,6 +7,7 @@ import { Progress } from '@/components/ui/progress';
 import { DataReview } from '@/components/DataReview';
 import { ExportSidebar } from '@/components/ExportSidebar';
 import { ImageCapture, BusinessCardCaptureMode, QueuedCapture } from '@/components/ImageCapture';
+import { ScanToSheetLoadingAnimation } from '@/components/ScanToSheetLoadingAnimation';
 import { SettingsMenu } from '@/components/SettingsMenu';
 import { SessionBanner } from '@/components/business-cards/SessionBanner';
 import {
@@ -954,24 +955,20 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
         )}
 
         {step === 'processing' && (
-          <div className="flex flex-col items-center justify-center py-20 space-y-4">
-            <img src="/Scan%20logo.webp" alt="Scan2Sheet logo" className="w-16 h-16 rounded-full object-cover animate-pulse" />
-            <div className="text-center">
-              <p className="font-medium text-foreground">Extracting data...</p>
-              <p className="text-sm text-muted-foreground mt-1">Analyzing your card record</p>
-            </div>
-          </div>
+          <ScanToSheetLoadingAnimation
+            className="py-10"
+            title="Extracting data..."
+            subtitle="Analyzing your card record"
+          />
         )}
 
         {step === 'batch-processing' && (
           <div className="space-y-5">
-            <div className="flex items-center gap-3">
-              <img src="/Scan%20logo.webp" alt="Scan2Sheet logo" className="w-10 h-10 rounded-full object-cover animate-pulse" />
-              <div>
-                <h2 className="text-xl font-semibold text-foreground">Processing Batch</h2>
-                <p className="text-sm text-muted-foreground">Front/back cards are being merged now.</p>
-              </div>
-            </div>
+            <ScanToSheetLoadingAnimation
+              className="py-4"
+              title="Processing Batch"
+              subtitle="Front/back cards are being merged now."
+            />
 
             <div className="space-y-2">
               <Progress value={batchProgressPercent} />
@@ -1036,8 +1033,8 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
               </div>
             </div>
 
-            <div className="lg:grid lg:grid-cols-[minmax(0,1fr)_320px] lg:gap-6 lg:items-start space-y-6 lg:space-y-0">
-              <div className="min-w-0">
+            <div className="grid grid-cols-1 gap-6 min-[1200px]:grid-cols-[minmax(720px,1fr)_340px] min-[1200px]:items-start min-[1200px]:gap-8">
+              <div className="min-w-0 space-y-6">
                 <DataReview
                   docType="business-card"
                   data={data}
