@@ -21,6 +21,7 @@ import { cn } from '@/lib/utils';
 import { BusinessCardCaptureMode, ImageCapture, QueuedCapture } from '@/components/ImageCapture';
 import { DataReview } from '@/components/DataReview';
 import { ScanHistory } from '@/components/ScanHistory';
+import { ScanToSheetLoadingAnimation } from '@/components/ScanToSheetLoadingAnimation';
 import {
   BatchCardItem,
   BatchProgressSnapshot,
@@ -969,32 +970,20 @@ const Index = () => {
         )}
 
         {step === 'processing' && (
-          <div className="flex flex-col items-center justify-center py-20 space-y-4">
-            <img
-              src="/Scan%20logo.webp"
-              alt="Scan2Sheet logo"
-              className="w-16 h-16 rounded-full object-cover animate-pulse"
-            />
-            <div className="text-center">
-              <p className="font-medium text-foreground">Extracting data...</p>
-              <p className="text-sm text-muted-foreground mt-1">Analyzing your card record</p>
-            </div>
-          </div>
+          <ScanToSheetLoadingAnimation
+            className="py-10"
+            title="Extracting data..."
+            subtitle="Analyzing your card record"
+          />
         )}
 
         {step === 'batch-processing' && (
           <div className="space-y-5">
-            <div className="flex items-center gap-3">
-              <img
-                src="/Scan%20logo.webp"
-                alt="Scan2Sheet logo"
-                className="w-10 h-10 rounded-full object-cover animate-pulse"
-              />
-              <div>
-                <h2 className="text-xl font-semibold text-foreground">Processing Batch</h2>
-                <p className="text-sm text-muted-foreground">Front/back cards are being merged now.</p>
-              </div>
-            </div>
+            <ScanToSheetLoadingAnimation
+              className="py-4"
+              title="Processing Batch"
+              subtitle="Front/back cards are being merged now."
+            />
 
             <div className="space-y-2">
               <Progress value={batchProgressPercent} />

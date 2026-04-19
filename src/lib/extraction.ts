@@ -96,7 +96,11 @@ export async function extractFromImage(
     logExtractionDebug('signup-sheet', result);
 
     if (Array.isArray(result.rows) && result.rows.length > 0) {
-      const entries = mapSignupRowsWithColumnResolution(result.rows, result.detectedHeaders ?? []);
+      const entries = mapSignupRowsWithColumnResolution(
+        result.rows,
+        result.detectedHeaders ?? [],
+        result.rawRows,
+      );
       const meta: ExtractionMeta = {
         structure: (result.structure as ExtractionMeta['structure']) ?? 'table',
         detectedHeaders: result.detectedHeaders ?? [],
@@ -526,6 +530,7 @@ function isLikelyNameValue(value: string): boolean {
   if (/\d{3,}/.test(trimmed)) return false;
   const words = trimmed.split(/\s+/).filter(Boolean);
   if (words.length < 1 || words.length > 4) return false;
+  if (words.length === 1 && /^[A-Z&/.-]{2,10}$/.test(trimmed)) return false;
   return /^[A-Za-z'\-.\s]+$/.test(trimmed);
 }
 
@@ -533,6 +538,7 @@ function isLikelyOrganizationValue(value: string): boolean {
   const trimmed = value.trim();
   if (!trimmed || looksLikeEmail(trimmed) || looksLikePhone(trimmed)) return false;
   if (ORGANIZATION_HINTS.test(trimmed)) return true;
+  if (/^[A-Z0-9&/.-]{2,12}$/.test(trimmed)) return true;
   const words = trimmed.split(/\s+/).filter(Boolean);
   return words.length >= 2 && words.length <= 6;
 }
@@ -746,7 +752,7 @@ function buildSignupTableData(
   };
 }
 
-function mapSignupRowsWithColumnResolution(
+function mapSignupRowsByColumnResolution(
   rows: Array<Record<string, unknown>>,
   detectedHeaders: string[],
 ): SignupEntry[] {
@@ -838,6 +844,115 @@ function mapSignupRowsWithColumnResolution(
       } satisfies SignupEntry;
     })
     .filter((entry): entry is SignupEntry => entry !== null);
+}
+
+function countSignupCoreFields(entry: Partial<SignupEntry>): number {
+  return [entry.fullName, entry.organization, entry.email, entry.phone]
+    .filter((value) => asCleanString(value).length > 0)
+    .length;
+}
+
+function shouldUseRawSignupValue(
+  field: 'fullName' | 'organization',
+  currentValue: string,
+  rawValue: string,
+): boolean {
+  const current = currentValue.trim();
+  const fallback = rawValue.trim();
+
+  if (!fallback) return false;
+  if (!current) return true;
+
+  if (field === 'fullName') {
+    if (looksLikeAliasValue(current, SIGNUP_FIELD_MAP.fullName)) return true;
+    return !isLikelyNameValue(current) && isLikelyNameValue(fallback);
+  }
+
+  if (looksLikeAliasValue(current, SIGNUP_FIELD_MAP.organization)) return true;
+  return !isLikelyOrganizationValue(current) && isLikelyOrganizationValue(fallback);
+}
+
+function mergeSignupEntries(primary: SignupEntry, fallback: SignupEntry): SignupEntry {
+  const fullName = shouldUseRawSignupValue('fullName', primary.fullName, fallback.fullName)
+    ? fallback.fullName
+    : primary.fullName;
+  const organization = shouldUseRawSignupValue('organization', primary.organization, fallback.organization)
+    ? fallback.organization
+    : primary.organization;
+
+  return {
+    ...primary,
+    fullName,
+    organization,
+    phone: primary.phone || fallback.phone,
+    email: primary.email || fallback.email,
+    screening: primary.screening || fallback.screening,
+    shareInfo: primary.shareInfo || fallback.shareInfo,
+    date: primary.date || fallback.date,
+    comments: primary.comments || fallback.comments,
+    extraFields: {
+      ...(fallback.extraFields ?? {}),
+      ...(primary.extraFields ?? {}),
+    },
+  };
+}
+
+function findRawSignupMatchIndex(
+  entry: SignupEntry,
+  candidates: SignupEntry[],
+  used: Set<number>,
+  fallbackIndex: number,
+): number {
+  const email = entry.email.trim().toLowerCase();
+  const phone = entry.phone.replace(/\D/g, '');
+
+  const directMatchIndex = candidates.findIndex((candidate, index) => {
+    if (used.has(index)) return false;
+    const candidateEmail = candidate.email.trim().toLowerCase();
+    const candidatePhone = candidate.phone.replace(/\D/g, '');
+
+    if (email && candidateEmail && candidateEmail === email) return true;
+    if (phone && candidatePhone && candidatePhone === phone) return true;
+    return false;
+  });
+
+  if (directMatchIndex >= 0) return directMatchIndex;
+  if (fallbackIndex < candidates.length && !used.has(fallbackIndex)) return fallbackIndex;
+  return -1;
+}
+
+function hydrateSignupEntriesFromRawRows(
+  entries: SignupEntry[],
+  rawRows: Array<Record<string, string>>,
+  detectedHeaders: string[],
+): SignupEntry[] {
+  if (entries.length === 0 || rawRows.length === 0) return entries;
+
+  const rawEntries = mapSignupRowsByColumnResolution(rawRows, detectedHeaders);
+  if (rawEntries.length === 0) return entries;
+
+  const usedRawIndexes = new Set<number>();
+
+  return entries.map((entry, index) => {
+    const rawIndex = findRawSignupMatchIndex(entry, rawEntries, usedRawIndexes, index);
+    if (rawIndex < 0) return entry;
+
+    usedRawIndexes.add(rawIndex);
+    const fallback = rawEntries[rawIndex];
+    const merged = mergeSignupEntries(entry, fallback);
+
+    return countSignupCoreFields(merged) >= countSignupCoreFields(entry) ? merged : entry;
+  });
+}
+
+function mapSignupRowsWithColumnResolution(
+  rows: Array<Record<string, unknown>>,
+  detectedHeaders: string[],
+  rawRows?: Array<Record<string, string>>,
+): SignupEntry[] {
+  const entries = mapSignupRowsByColumnResolution(rows, detectedHeaders);
+  if (!rawRows?.length) return entries;
+  return hydrateSignupEntriesFromRawRows(entries, rawRows, detectedHeaders);
 }
 
 type DynamicMappedRow = {

@@ -310,6 +310,47 @@ describe('extraction', () => {
       expect(row.extraFields.table).toBe('A4');
     });
 
+    it('hydrates missing structured name and organization from rawRows', async () => {
+      const mockResponse = {
+        status: 'complete',
+        structure: 'table',
+        detectedHeaders: ['Name', 'Organization', 'Email', 'Phone'],
+        headerMapping: [],
+        rows: [
+          {
+            id: '1',
+            fullName: '',
+            organization: '',
+            email: 'jordan@wcns.org',
+            phone: '313-555-0142',
+          },
+        ],
+        rawRows: [
+          {
+            c1: 'Jordan Lee',
+            c2: 'WCNS',
+            c3: 'jordan@wcns.org',
+            c4: '313-555-0142',
+          },
+        ],
+        confidence: 0.78,
+      };
+
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(mockResponse),
+      }));
+
+      const file = new File(['test'], 'sheet-raw-rows.pdf', { type: 'application/pdf' });
+      const result = await extractFromImage(file, 'signup-sheet');
+
+      const row = result.entries[0] as any;
+      expect(row.fullName).toBe('Jordan Lee');
+      expect(row.organization).toBe('WCNS');
+      expect(row.email).toBe('jordan@wcns.org');
+      expect(row.phone).toBe('313-555-0142');
+    });
+
     it('skips rows that are actually header labels', async () => {
       const mockResponse = {
         status: 'complete',
@@ -397,6 +438,48 @@ describe('extraction', () => {
       expect(second.email).toBe('taylor@uplift.org');
       expect(second.phone).toBe('313-555-0114');
       expect(second.organization).toBe('Uplift Detroit');
+    });
+
+    it('infers short uppercase organization acronyms from weak headers', async () => {
+      const mockResponse = {
+        status: 'complete',
+        structure: 'table',
+        detectedHeaders: ['Contact', 'Info', 'Details', 'Other'],
+        headerMapping: [],
+        rows: [
+          {
+            id: 'r1',
+            c1: 'Jordan Miles',
+            c2: 'jordan@wcns.org',
+            c3: '313-555-0113',
+            c4: 'WCNS',
+          },
+          {
+            id: 'r2',
+            c1: 'Taylor Reed',
+            c2: 'taylor@nlsm.org',
+            c3: '313-555-0114',
+            c4: 'NLSM',
+          },
+        ],
+        confidence: 0.7,
+      };
+
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(mockResponse),
+      }));
+
+      const file = new File(['test'], 'sheet-acronyms.pdf', { type: 'application/pdf' });
+      const result = await extractFromImage(file, 'signup-sheet');
+
+      const first = result.entries[0] as any;
+      expect(first.fullName).toBe('Jordan Miles');
+      expect(first.organization).toBe('WCNS');
+
+      const second = result.entries[1] as any;
+      expect(second.fullName).toBe('Taylor Reed');
+      expect(second.organization).toBe('NLSM');
     });
   });
 
