@@ -26,7 +26,13 @@ export interface BusinessCardEntry {
   address: string;
   sourceLabel?: string;
   sourceItemId?: string;
+  sourceCardId?: string;
   sourceType?: 'camera' | 'upload';
+  hasBack?: boolean;
+  frontPreviewUrl?: string;
+  backPreviewUrl?: string;
+  backText?: string;
+  conflictFields?: string[];
   needsReview?: boolean;
   status?: 'complete' | 'needs_review' | 'failed';
   error?: string;
@@ -61,16 +67,21 @@ export interface ScanRecord {
 
 export type BatchItemStatus = 'queued' | 'processing' | 'done' | 'failed' | 'needs_review';
 
-export interface BatchItem {
-  id: string;
+export interface CardImageSide {
   file: File;
   previewUrl: string;
+  filename?: string;
+  sourceType: 'camera' | 'upload';
+}
+
+export interface BatchCardItem {
+  id: string;
+  front: CardImageSide;
+  back?: CardImageSide;
   status: BatchItemStatus;
   error?: string;
   extractedRows: BusinessCardEntry[];
-  sourceType: 'camera' | 'upload';
   needsReview: boolean;
-  filename?: string;
   index: number;
 }
 

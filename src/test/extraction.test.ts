@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { extractFromImage, createEmptySignupEntry, createEmptyBusinessCard } from '@/lib/extraction';
+import { extractFromImage, extractBusinessCardRecord, createEmptySignupEntry, createEmptyBusinessCard } from '@/lib/extraction';
 
 // Mock env vars
 vi.stubGlobal('import', { meta: { env: { DEV: true } } });
@@ -175,6 +175,78 @@ describe('extraction', () => {
       expect(card.rawText).toBe('John Doe\nAcme\njohn@acme.com');
     });
 
+    it('maps business card alias keys and preserves unknown fields', async () => {
+      const mockResponse = {
+        status: 'complete',
+        structure: 'single-entity',
+        detectedHeaders: ['Name', 'Company Name', 'Job Title', 'Email Address', 'Phone Number', 'URL', 'Mailing Address', 'Department'],
+        headerMapping: [],
+        card: {
+          id: 'card-1',
+          name: 'Taylor Brooks',
+          companyName: 'Civic Partners',
+          jobTitle: 'Program Director',
+          emailAddress: 'taylor@civicpartners.org',
+          phoneNumber: '313-555-0147',
+          url: 'https://civicpartners.org',
+          mailingAddress: '123 Main St, Detroit, MI',
+          Department: 'Outreach',
+          rawText: 'Taylor Brooks\nCivic Partners',
+        },
+        confidence: 0.84,
+      };
+
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(mockResponse),
+      }));
+
+      const file = new File(['test'], 'card-alias.jpg', { type: 'image/jpeg' });
+      const result = await extractFromImage(file, 'business-card');
+
+      const card = result.entries[0] as any;
+      expect(card.fullName).toBe('Taylor Brooks');
+      expect(card.company).toBe('Civic Partners');
+      expect(card.title).toBe('Program Director');
+      expect(card.email).toBe('taylor@civicpartners.org');
+      expect(card.phone).toBe('313-555-0147');
+      expect(card.website).toBe('https://civicpartners.org');
+      expect(card.address).toBe('123 Main St, Detroit, MI');
+      expect(card.extraFields.Department).toBe('Outreach');
+    });
+
+    it('maps business card organization and mobile aliases into canonical fields', async () => {
+      const mockResponse = {
+        status: 'complete',
+        structure: 'single-entity',
+        detectedHeaders: ['Organization', 'Mobile', 'Contact Name', 'Notes'],
+        headerMapping: [],
+        card: {
+          id: 'card-2',
+          contactName: 'Jordan Lee',
+          organization: 'Neighborhood Alliance',
+          mobile: '313-555-0172',
+          Notes: 'Met at annual summit',
+          rawText: 'Jordan Lee\nNeighborhood Alliance',
+        },
+        confidence: 0.79,
+      };
+
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(mockResponse),
+      }));
+
+      const file = new File(['test'], 'card-mobile.jpg', { type: 'image/jpeg' });
+      const result = await extractFromImage(file, 'business-card');
+
+      const card = result.entries[0] as any;
+      expect(card.fullName).toBe('Jordan Lee');
+      expect(card.company).toBe('Neighborhood Alliance');
+      expect(card.phone).toBe('313-555-0172');
+      expect(card.extraFields.Notes).toBe('Met at annual summit');
+    });
+
     it('maps sign-in response with extra unmapped fields', async () => {
       const mockResponse = {
         status: 'complete',
@@ -201,6 +273,128 @@ describe('extraction', () => {
 
       expect(result.entries).toHaveLength(1);
       expect((result.entries[0] as any).extraFields['Badge Number']).toBe('1234');
+    });
+
+    it('maps sign-in alias keys for name and organization', async () => {
+      const mockResponse = {
+        status: 'complete',
+        structure: 'table',
+        detectedHeaders: ['Name', 'Org', 'Email', 'Phone'],
+        headerMapping: [],
+        rows: [
+          {
+            id: '1',
+            name: 'Lindsey Blake',
+            org: 'WCNS',
+            emailAddress: 'lindsey@example.com',
+            phoneNumber: '313-555-0199',
+            table: 'A4',
+          },
+        ],
+        confidence: 0.75,
+      };
+
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(mockResponse),
+      }));
+
+      const file = new File(['test'], 'sheet.pdf', { type: 'application/pdf' });
+      const result = await extractFromImage(file, 'signup-sheet');
+
+      const row = result.entries[0] as any;
+      expect(row.fullName).toBe('Lindsey Blake');
+      expect(row.organization).toBe('WCNS');
+      expect(row.email).toBe('lindsey@example.com');
+      expect(row.phone).toBe('313-555-0199');
+      expect(row.extraFields.table).toBe('A4');
+    });
+  });
+
+  describe('extractBusinessCardRecord — front/back merge', () => {
+    beforeEach(() => {
+      vi.stubEnv('VITE_DOC_INTEL_URL', 'https://mock.api');
+      vi.stubEnv('VITE_DOC_INTEL_TOKEN', 'mock-token');
+    });
+
+    it('merges front and back into one row and keeps front as primary on conflicts', async () => {
+      const frontResponse = {
+        status: 'complete',
+        structure: 'single-entity',
+        detectedHeaders: [],
+        headerMapping: [],
+        confidence: 0.8,
+        card: {
+          id: 'front',
+          fullName: 'Jordan Blake',
+          company: 'Nxt Lvl',
+          phone: '313-555-0101',
+          email: 'jordan@nxtlvl.com',
+          website: '',
+          address: '',
+          social: '',
+          extraFields: {},
+          rawText: 'Jordan Blake\nNxt Lvl',
+        },
+      };
+
+      const backResponse = {
+        status: 'complete',
+        structure: 'single-entity',
+        detectedHeaders: [],
+        headerMapping: [],
+        confidence: 0.7,
+        card: {
+          id: 'back',
+          fullName: 'Jordan Blake',
+          company: 'NXT LEVEL',
+          phone: '313-555-0199',
+          email: '',
+          website: 'https://nxtlvl.com',
+          address: 'Detroit, MI',
+          social: '@nxtlvl',
+          extraFields: { Services: 'AI, Automation' },
+          rawText: 'Services: AI, Automation',
+        },
+      };
+
+      vi.stubGlobal('fetch', vi.fn()
+        .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve(frontResponse) })
+        .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve(backResponse) }));
+
+      const frontFile = new File(['front'], 'card-front.jpg', { type: 'image/jpeg' });
+      const backFile = new File(['back'], 'card-back.jpg', { type: 'image/jpeg' });
+
+      const merged = await extractBusinessCardRecord({
+        id: 'card-1',
+        front: {
+          file: frontFile,
+          previewUrl: 'blob:front',
+          filename: 'card-front.jpg',
+          sourceType: 'camera',
+        },
+        back: {
+          file: backFile,
+          previewUrl: 'blob:back',
+          filename: 'card-back.jpg',
+          sourceType: 'camera',
+        },
+        status: 'queued',
+        error: undefined,
+        extractedRows: [],
+        needsReview: false,
+        index: 0,
+      });
+
+      expect(merged.fullName).toBe('Jordan Blake');
+      expect(merged.company).toBe('Nxt Lvl');
+      expect(merged.phone).toBe('313-555-0101');
+      expect(merged.website).toBe('https://nxtlvl.com');
+      expect(merged.address).toBe('Detroit, MI');
+      expect(merged.extraFields.Services).toBe('AI, Automation');
+      expect(merged.extraFields.back_phone).toBe('313-555-0199');
+      expect(merged.backText).toContain('Services: AI, Automation');
+      expect(merged.conflictFields).toContain('phone');
     });
   });
 });

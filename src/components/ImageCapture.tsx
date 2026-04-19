@@ -19,14 +19,16 @@ export interface QueuedCapture {
 }
 
 interface ImageCaptureProps {
-  onImageSelected: (file: File, previewUrl: string) => void;
+  onImageSelected: (file: File, previewUrl: string, sourceType?: 'camera' | 'upload') => void;
   mode?: BusinessCardCaptureMode;
   onBatchAdd?: (captures: QueuedCapture[]) => void;
   capturedCount?: number;
   recentPreviews?: string[];
+  rapidAwaitingBack?: boolean;
   onFinishBatch?: () => void;
   onViewQueue?: () => void;
   onCancelBatch?: () => void;
+  onSkipBack?: () => void;
   onRetakeLast?: () => void;
 }
 
@@ -57,9 +59,11 @@ export function ImageCapture({
   onBatchAdd,
   capturedCount = 0,
   recentPreviews = [],
+  rapidAwaitingBack = false,
   onFinishBatch,
   onViewQueue,
   onCancelBatch,
+  onSkipBack,
   onRetakeLast,
 }: ImageCaptureProps) {
   const [preview, setPreview] = useState<string | null>(null);
@@ -85,7 +89,7 @@ export function ImageCapture({
     return true;
   }, [isLikelyImageFile]);
 
-  const handleSingleFile = useCallback((file: File) => {
+  const handleSingleFile = useCallback((file: File, sourceType: 'camera' | 'upload') => {
     const result = validateFile(file);
     if (!result.valid) {
       toast.error(result.error);
@@ -95,7 +99,7 @@ export function ImageCapture({
     const url = isLikelyImageFile(file) ? URL.createObjectURL(file) : null;
     setPreview(url);
     setSelectedFile(file);
-    onImageSelected(file, url ?? '');
+    onImageSelected(file, url ?? '', sourceType);
   }, [isLikelyImageFile, onImageSelected]);
 
   const queueFiles = useCallback((files: FileList | File[], sourceType: 'camera' | 'upload') => {
@@ -121,7 +125,7 @@ export function ImageCapture({
 
     if (mode === 'single') {
       const file = e.dataTransfer.files[0];
-      if (file) handleSingleFile(file);
+      if (file) handleSingleFile(file, 'upload');
       return;
     }
 
@@ -183,8 +187,14 @@ export function ImageCapture({
           )}
           {isRapidMode && (
             <>
-              <p className="font-medium text-foreground">{capturedCount} captured</p>
-              <p className="text-sm text-muted-foreground mt-1">Take photos quickly, then process them together.</p>
+              <p className="font-medium text-foreground">
+                {rapidAwaitingBack ? 'Does this card have a back?' : `${capturedCount} cards queued`}
+              </p>
+              <p className="text-sm text-muted-foreground mt-1">
+                {rapidAwaitingBack
+                  ? 'Capture the back now or skip and move to the next card.'
+                  : 'Capture front, then optionally capture back, then move to next card.'}
+              </p>
             </>
           )}
           {isMultiUploadMode && (
@@ -207,7 +217,7 @@ export function ImageCapture({
                   className="hidden"
                   onChange={(e) => {
                     const file = e.target.files?.[0];
-                    if (file) handleSingleFile(file);
+                    if (file) handleSingleFile(file, 'upload');
                   }}
                 />
               </label>
@@ -223,7 +233,7 @@ export function ImageCapture({
                   className="hidden"
                   onChange={(e) => {
                     const file = e.target.files?.[0];
-                    if (file) handleSingleFile(file);
+                    if (file) handleSingleFile(file, 'camera');
                   }}
                 />
               </label>
@@ -237,7 +247,7 @@ export function ImageCapture({
               <Button size="sm" asChild>
                 <label className="cursor-pointer">
                   <Camera className="w-4 h-4 mr-2" />
-                  Capture
+                  {rapidAwaitingBack ? 'Capture Back' : 'Capture Front'}
                   <input
                     type="file"
                     accept="image/*"
@@ -250,6 +260,11 @@ export function ImageCapture({
                   />
                 </label>
               </Button>
+              {rapidAwaitingBack && (
+                <Button type="button" variant="outline" size="sm" onClick={onSkipBack}>
+                  Skip Back
+                </Button>
+              )}
               <Button type="button" variant="outline" size="sm" onClick={onFinishBatch}>
                 Finish Batch
               </Button>

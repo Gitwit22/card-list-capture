@@ -17,6 +17,7 @@ interface DataReviewProps {
   onBusinessCardFilterChange?: (filter: BusinessCardFilter) => void;
   onReviewProblemRows?: () => void;
   onRetryFailed?: () => void;
+  cardPreviewMap?: Record<string, { front?: string; back?: string }>;
 }
 
 export function DataReview({
@@ -28,6 +29,7 @@ export function DataReview({
   onBusinessCardFilterChange,
   onReviewProblemRows,
   onRetryFailed,
+  cardPreviewMap,
 }: DataReviewProps) {
   const [showExtras, setShowExtras] = useState<Record<string, boolean>>({});
   const [showDebug, setShowDebug] = useState(false);
@@ -211,6 +213,12 @@ export function DataReview({
                       {(entry as BusinessCardEntry).sourceLabel && (
                         <Badge variant="outline">{(entry as BusinessCardEntry).sourceLabel}</Badge>
                       )}
+                      <Badge variant={(entry as BusinessCardEntry).hasBack ? 'default' : 'secondary'}>
+                        {(entry as BusinessCardEntry).hasBack ? 'Front + Back' : 'Front Only'}
+                      </Badge>
+                      {((entry as BusinessCardEntry).conflictFields?.length ?? 0) > 0 && (
+                        <Badge variant="secondary">Conflict</Badge>
+                      )}
                     </>
                   )}
                 </div>
@@ -224,6 +232,45 @@ export function DataReview({
               {docType === 'business-card' && (entry as BusinessCardEntry).error && (
                 <p className="text-xs text-destructive mb-3">{(entry as BusinessCardEntry).error}</p>
               )}
+
+              {docType === 'business-card' && (() => {
+                const cardEntry = entry as BusinessCardEntry;
+                const sourceCardId = cardEntry.sourceCardId || cardEntry.sourceItemId;
+                const previews = sourceCardId ? cardPreviewMap?.[sourceCardId] : undefined;
+
+                if (!previews?.front && !previews?.back && !cardEntry.backText && !cardEntry.conflictFields?.length) {
+                  return null;
+                }
+
+                return (
+                  <div className="mb-3 space-y-2">
+                    {(previews?.front || previews?.back) && (
+                      <div className="flex flex-wrap gap-2">
+                        {previews?.front && (
+                          <Button type="button" size="sm" variant="outline" asChild>
+                            <a href={previews.front} target="_blank" rel="noreferrer">View Front</a>
+                          </Button>
+                        )}
+                        {previews?.back && (
+                          <Button type="button" size="sm" variant="outline" asChild>
+                            <a href={previews.back} target="_blank" rel="noreferrer">View Back</a>
+                          </Button>
+                        )}
+                      </div>
+                    )}
+                    {cardEntry.conflictFields && cardEntry.conflictFields.length > 0 && (
+                      <p className="text-xs text-amber-600">
+                        Conflict fields: {cardEntry.conflictFields.join(', ')}
+                      </p>
+                    )}
+                    {cardEntry.backText && (
+                      <p className="text-xs text-muted-foreground">
+                        Back text captured and merged into this row.
+                      </p>
+                    )}
+                  </div>
+                );
+              })()}
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 {fields.map((field) => (

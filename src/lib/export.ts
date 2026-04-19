@@ -57,8 +57,12 @@ export function exportToExcel(data: (SignupEntry | BusinessCardEntry)[], docType
         'Address': entry.address,
         'Social': entry.social,
         'Source': entry.sourceLabel || '',
+        'Source Card Id': entry.sourceCardId || entry.sourceItemId || '',
+        'Has Back': entry.hasBack ? 'yes' : 'no',
         'Capture Type': entry.sourceType || '',
         'Status': entry.status || (entry.needsReview ? 'needs_review' : 'complete'),
+        'Conflict Fields': (entry.conflictFields ?? []).join(', '),
+        'Back Text': entry.backText || '',
         'Notes': entry.error || '',
       };
 
