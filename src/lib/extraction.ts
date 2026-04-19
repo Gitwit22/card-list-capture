@@ -40,6 +40,34 @@ interface ExtractionResponse {
   fields: ExtractionField[];
 }
 
+interface StructuredCellValue {
+  text?: unknown;
+  value?: unknown;
+  content?: unknown;
+  raw_text?: unknown;
+  rawText?: unknown;
+  normalized_text?: unknown;
+  normalizedText?: unknown;
+  row_number?: unknown;
+  rowNumber?: unknown;
+  column_number?: unknown;
+  columnNumber?: unknown;
+  is_in_first_row?: unknown;
+  isInFirstRow?: unknown;
+  font_bold?: unknown;
+  fontBold?: unknown;
+  data_type?: unknown;
+  dataType?: unknown;
+}
+
+interface CellMetadata {
+  rowNumber?: number;
+  columnNumber?: number;
+  isInFirstRow?: boolean;
+  fontBold?: boolean;
+  dataType?: string;
+}
+
 export interface ExtractionResult<T> {
   entries: T[];
   meta: ExtractionMeta;
@@ -474,7 +502,74 @@ function asCleanString(value: unknown): string {
   if (value === null || value === undefined) return '';
   if (typeof value === 'string') return value.trim();
   if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  if (typeof value === 'object') {
+    const objectValue = value as StructuredCellValue;
+    const candidates = [
+      objectValue.text,
+      objectValue.value,
+      objectValue.content,
+      objectValue.raw_text,
+      objectValue.rawText,
+      objectValue.normalized_text,
+      objectValue.normalizedText,
+    ];
+
+    for (const candidate of candidates) {
+      if (typeof candidate === 'string' && candidate.trim()) return candidate.trim();
+      if (typeof candidate === 'number' || typeof candidate === 'boolean') return String(candidate);
+    }
+  }
   return '';
+}
+
+function asBoolean(value: unknown): boolean | undefined {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value !== 0;
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (['true', 'yes', 'y', '1'].includes(normalized)) return true;
+    if (['false', 'no', 'n', '0'].includes(normalized)) return false;
+  }
+  return undefined;
+}
+
+function asNumber(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string') {
+    const parsed = Number(value.trim());
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return undefined;
+}
+
+function getCellMetadata(value: unknown): CellMetadata | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+
+  const objectValue = value as StructuredCellValue;
+  const rowNumber = asNumber(objectValue.row_number ?? objectValue.rowNumber);
+  const columnNumber = asNumber(objectValue.column_number ?? objectValue.columnNumber);
+  const isInFirstRow = asBoolean(objectValue.is_in_first_row ?? objectValue.isInFirstRow);
+  const fontBold = asBoolean(objectValue.font_bold ?? objectValue.fontBold);
+  const rawDataType = objectValue.data_type ?? objectValue.dataType;
+  const dataType = typeof rawDataType === 'string' ? rawDataType.trim().toLowerCase() : undefined;
+
+  if (
+    rowNumber === undefined
+    && columnNumber === undefined
+    && isInFirstRow === undefined
+    && fontBold === undefined
+    && !dataType
+  ) {
+    return undefined;
+  }
+
+  return {
+    rowNumber,
+    columnNumber,
+    isInFirstRow,
+    fontBold,
+    dataType,
+  };
 }
 
 function looksLikeEmail(value: string): boolean {
@@ -585,6 +680,24 @@ function isLikelyHeaderRow(row: string[], headers: string[]): boolean {
   }
 
   return compared > 0 && matches === compared;
+}
+
+function isLikelyHeaderRowByMetadata(cells: string[], metadataRow?: Array<CellMetadata | undefined>): boolean {
+  if (!metadataRow || metadataRow.length === 0) return false;
+
+  const nonEmptyCount = cells.filter((cell) => cell.trim().length > 0).length;
+  if (nonEmptyCount < 2) return false;
+
+  let firstRowSignals = 0;
+  let boldSignals = 0;
+
+  for (const cellMeta of metadataRow) {
+    if (!cellMeta) continue;
+    if (cellMeta.isInFirstRow === true || cellMeta.rowNumber === 1) firstRowSignals += 1;
+    if (cellMeta.fontBold === true) boldSignals += 1;
+  }
+
+  return firstRowSignals > 0 || boldSignals >= Math.ceil(nonEmptyCount * 0.5);
 }
 
 function isLikelyAliasOnlyRow(row: string[]): boolean {
@@ -736,20 +849,75 @@ function buildSignupTableData(
   sourceKeys: string[];
   headerLabels: string[];
   matrix: string[][];
+  metaMatrix: Array<Array<CellMetadata | undefined>>;
+  headerRowIndices: Set<number>;
 } {
-  const first = rows[0] ?? {};
-  const sourceKeys = Object.keys(first).filter((key) => !['id', 'extraFields'].includes(normalizeKey(key)));
-  const headerLabels = detectedHeaders.length === sourceKeys.length
+  const ignoreKeys = new Set(['id', 'extrafields', 'metadata', 'meta', 'region', 'sheet']);
+  const sourceKeysSet = new Set<string>();
+
+  rows.forEach((row) => {
+    Object.keys(row).forEach((key) => {
+      if (ignoreKeys.has(normalizeKey(key))) return;
+      sourceKeysSet.add(key);
+    });
+  });
+
+  const sourceKeys = Array.from(sourceKeysSet);
+  const matrix = rows.map((row) => sourceKeys.map((key) => asCleanString(row[key])));
+  const metaMatrix = rows.map((row) => sourceKeys.map((key) => getCellMetadata(row[key])));
+
+  const headerRowIndices = new Set<number>();
+  matrix.forEach((cells, index) => {
+    if (isLikelyHeaderRowByMetadata(cells, metaMatrix[index])) {
+      headerRowIndices.add(index);
+    }
+  });
+
+  let headerLabels = detectedHeaders.length === sourceKeys.length
     ? detectedHeaders
     : sourceKeys;
 
-  const matrix = rows.map((row) => sourceKeys.map((key) => asCleanString(row[key])));
+  if (detectedHeaders.length !== sourceKeys.length && headerRowIndices.size > 0) {
+    const [firstHeaderIndex] = [...headerRowIndices].sort((a, b) => a - b);
+    const metadataHeaders = (matrix[firstHeaderIndex] ?? []).map((value, colIndex) => {
+      const fallback = sourceKeys[colIndex] ?? `col${colIndex + 1}`;
+      return value.trim() || fallback;
+    });
+
+    if (metadataHeaders.some((value) => value.trim().length > 0)) {
+      headerLabels = metadataHeaders;
+    }
+  }
 
   return {
     sourceKeys,
     headerLabels,
     matrix,
+    metaMatrix,
+    headerRowIndices,
   };
+}
+
+function reconcileNameAndOrganization(entry: SignupEntry): SignupEntry {
+  const fullName = entry.fullName.trim();
+  const organization = entry.organization.trim();
+
+  if (!fullName && !organization) return entry;
+
+  const fullNameIsAlias = looksLikeAliasValue(fullName, SIGNUP_FIELD_MAP.fullName);
+  const orgIsAlias = looksLikeAliasValue(organization, SIGNUP_FIELD_MAP.organization);
+  const fullNameLooksOrg = fullName && isLikelyOrganizationValue(fullName) && !isLikelyNameValue(fullName);
+  const orgLooksName = organization && isLikelyNameValue(organization) && !isLikelyOrganizationValue(organization);
+
+  if ((fullNameLooksOrg && orgLooksName) || (fullNameIsAlias && orgLooksName) || (orgIsAlias && fullName && !fullNameIsAlias)) {
+    return {
+      ...entry,
+      fullName: organization,
+      organization: fullName,
+    };
+  }
+
+  return entry;
 }
 
 function mapSignupRowsByColumnResolution(
@@ -758,7 +926,7 @@ function mapSignupRowsByColumnResolution(
 ): SignupEntry[] {
   if (rows.length === 0) return [];
 
-  const { sourceKeys, headerLabels, matrix } = buildSignupTableData(rows, detectedHeaders);
+  const { sourceKeys, headerLabels, matrix, metaMatrix, headerRowIndices } = buildSignupTableData(rows, detectedHeaders);
 
   if (sourceKeys.length === 0) {
     return rows.map(mapSignupRow).filter((entry) => {
@@ -767,7 +935,11 @@ function mapSignupRowsByColumnResolution(
     });
   }
 
-  const nonJunkRows = matrix.filter((row) => !isLikelyHeaderRow(row, headerLabels) && !isLikelyAliasOnlyRow(row));
+  const nonJunkRows = matrix.filter((row, index) => {
+    if (headerRowIndices.has(index)) return false;
+    if (isLikelyHeaderRowByMetadata(row, metaMatrix[index])) return false;
+    return !isLikelyHeaderRow(row, headerLabels) && !isLikelyAliasOnlyRow(row);
+  });
   const resolvedByHeader = resolveColumnIndices(headerLabels);
   const resolved = inferColumnsFromValues(nonJunkRows, resolvedByHeader);
 
@@ -776,7 +948,12 @@ function mapSignupRowsByColumnResolution(
   return rows
     .map((row, rowIndex) => {
       const cells = matrix[rowIndex] ?? [];
-      if (isLikelyHeaderRow(cells, headerLabels) || isLikelyAliasOnlyRow(cells)) {
+      if (
+        headerRowIndices.has(rowIndex)
+        || isLikelyHeaderRowByMetadata(cells, metaMatrix[rowIndex])
+        || isLikelyHeaderRow(cells, headerLabels)
+        || isLikelyAliasOnlyRow(cells)
+      ) {
         return null;
       }
 
@@ -786,14 +963,29 @@ function mapSignupRowsByColumnResolution(
         return (cells[index] ?? '').trim();
       };
 
-      const fullName = getByField('fullName');
-      const organization = getByField('organization');
+      const fullNameRaw = getByField('fullName');
+      const organizationRaw = getByField('organization');
       const email = getByField('email');
       const phone = getByField('phone');
       const screening = getByField('screening');
       const shareInfo = getByField('shareInfo');
       const date = getByField('date');
       const comments = getByField('comments');
+
+      const fullNameIndex = resolved.fullName;
+      const orgIndex = resolved.organization;
+      const fullNameHeader = fullNameIndex !== undefined ? (headerLabels[fullNameIndex] ?? '') : '';
+      const organizationHeader = orgIndex !== undefined ? (headerLabels[orgIndex] ?? '') : '';
+
+      const fullName = looksLikeAliasValue(fullNameRaw, SIGNUP_FIELD_MAP.fullName)
+        && computeHeaderMatchScore(fullNameHeader, SIGNUP_FIELD_MAP.fullName) > 0
+        ? ''
+        : fullNameRaw;
+
+      const organization = looksLikeAliasValue(organizationRaw, SIGNUP_FIELD_MAP.organization)
+        && computeHeaderMatchScore(organizationHeader, SIGNUP_FIELD_MAP.organization) > 0
+        ? ''
+        : organizationRaw;
 
       const looksLikeLabelRow = (
         (!fullName || looksLikeAliasValue(fullName, SIGNUP_FIELD_MAP.fullName))
@@ -830,7 +1022,7 @@ function mapSignupRowsByColumnResolution(
       const hasCore = [fullName, organization, email, phone].some((value) => value.trim().length > 0);
       if (!hasCore) return null;
 
-      return {
+      const normalizedEntry = {
         id: String(row.id ?? crypto.randomUUID()),
         fullName,
         organization,
@@ -842,6 +1034,8 @@ function mapSignupRowsByColumnResolution(
         comments,
         extraFields,
       } satisfies SignupEntry;
+
+      return reconcileNameAndOrganization(normalizedEntry);
     })
     .filter((entry): entry is SignupEntry => entry !== null);
 }

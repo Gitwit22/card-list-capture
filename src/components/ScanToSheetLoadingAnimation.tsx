@@ -20,13 +20,17 @@ export function ScanToSheetLoadingAnimation({
           <div className="absolute left-1/2 -translate-x-1/2 top-20 w-64 h-28 rounded-[2rem] bg-gradient-to-b from-neutral-800 to-neutral-900 border border-neutral-700 shadow-2xl overflow-hidden">
             <div className="absolute inset-x-6 top-5 h-3 rounded-full bg-neutral-700" />
             <div className="absolute inset-x-8 top-10 h-2 rounded-full bg-red-500/70 animate-pulse" />
-            <div className="absolute left-1/2 -translate-x-1/2 bottom-4 text-neutral-200 text-sm font-semibold tracking-[0.25em] uppercase">
-              STS
+            <div className="absolute left-1/2 -translate-x-1/2 bottom-4 text-neutral-200 text-[11px] font-semibold tracking-[0.14em] uppercase">
+              EXTRACTING
             </div>
           </div>
 
           <div className="absolute left-1/2 -translate-x-1/2 top-[92px] w-14 h-14 rounded-full border border-red-400/40 bg-neutral-900/80 backdrop-blur flex items-center justify-center shadow-lg">
-            <div className="text-red-400 text-xs font-bold tracking-[0.3em]">LOGO</div>
+            <img
+              src="/Scan%20logo.webp"
+              alt="Scan2Sheet logo"
+              className="w-9 h-9 rounded-full object-cover animate-[spin_2.8s_linear_infinite]"
+            />
           </div>
 
           <div className="absolute left-1/2 -translate-x-1/2 top-2 w-36 h-24 rounded-xl bg-white shadow-lg border border-neutral-200 animate-[feedIn_1.8s_ease-in-out_infinite] origin-bottom">
