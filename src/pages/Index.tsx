@@ -584,9 +584,6 @@ const Index = () => {
     cleanupObjectUrls(activeObjectUrlsRef.current);
     setEstimatedSessionBytes(0);
   }, [revokeQueuePreviewUrls, revokeSidePreview]);
-      return [];
-    });
-  }, [revokeQueuePreviewUrls, revokeSidePreview]);
 
   const queueCounts = useMemo(() => ({
     queued: batchQueue.filter((item) => item.status === 'queued').length,

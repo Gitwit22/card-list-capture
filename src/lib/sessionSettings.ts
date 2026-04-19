@@ -58,4 +58,3 @@ export function saveSessionSettings(settings: Partial<SessionSettings>): Session
 
   return next;
 }
-}
