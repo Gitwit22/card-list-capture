@@ -10,10 +10,12 @@ export interface SignupEntry {
   shareInfo: string;
   date: string;
   comments: string;
+  extraFields: Record<string, string>;
 }
 
 export interface BusinessCardEntry {
   id: string;
+  fullName: string;
   firstName: string;
   lastName: string;
   company: string;
@@ -28,6 +30,22 @@ export interface BusinessCardEntry {
   needsReview?: boolean;
   status?: 'complete' | 'needs_review' | 'failed';
   error?: string;
+  social: string;
+  extraFields: Record<string, string>;
+  rawText: string;
+}
+
+export interface HeaderMapping {
+  original: string;
+  normalized: string | null;
+}
+
+export interface ExtractionMeta {
+  structure: 'table' | 'single-entity' | 'unstructured';
+  detectedHeaders: string[];
+  headerMapping: HeaderMapping[];
+  confidence: number;
+  rawRows?: Array<Record<string, string>>;
 }
 
 export type ExtractedData = SignupEntry[] | BusinessCardEntry[];
@@ -37,6 +55,7 @@ export interface ScanRecord {
   type: DocumentType;
   imageUrl: string;
   data: ExtractedData;
+  meta?: ExtractionMeta;
   createdAt: Date;
 }
 

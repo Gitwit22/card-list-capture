@@ -28,6 +28,7 @@ import {
   BusinessCardEntry,
   DocumentType,
   ExtractedData,
+  ExtractionMeta,
   ScanRecord,
   SignupEntry,
 } from '@/types/scan';
@@ -83,10 +84,10 @@ const Index = () => {
   const [step, setStep] = useState<Step>('home');
   const [docType, setDocType] = useState<DocumentType>('business-card');
   const [captureMode, setCaptureMode] = useState<BusinessCardCaptureMode>('single');
-  const [imageFile, setImageFile] = useState<File | null>(null);
-  const [imageUrl, setImageUrl] = useState<string>('');
+  const [filePreviewUrl, setFilePreviewUrl] = useState<string>('');
   const [data, setData] = useState<(SignupEntry | BusinessCardEntry)[]>([]);
   const [businessCardFilter, setBusinessCardFilter] = useState<BusinessCardFilter>('all');
+  const [extractionMeta, setExtractionMeta] = useState<ExtractionMeta | undefined>();
   const [history, setHistory] = useState<ScanRecord[]>([]);
   const [batchQueue, setBatchQueue] = useState<BatchItem[]>([]);
   const [batchProgress, setBatchProgress] = useState<BatchProgressSnapshot>(emptySnapshot);
@@ -250,16 +251,16 @@ const Index = () => {
   }, [batchQueue, processBatch]);
 
   const handleImageSelected = async (file: File, previewUrl: string) => {
-    setImageFile(file);
-    setImageUrl(previewUrl);
+    setFilePreviewUrl(previewUrl);
     setStep('processing');
 
     try {
-      const extracted = await extractFromImage(file, docType);
-      setData(extracted);
-      setBusinessCardFilter('all');
+      const result = await extractFromImage(file, docType);
+      setData(result.entries);
+    setBusinessCardFilter('all');
+      setExtractionMeta(result.meta);
       setStep('review');
-      toast.info('Data extracted — please review and correct any errors before exporting.');
+      toast.info(`Data extracted (${result.entries.length} ${result.entries.length === 1 ? 'entry' : 'entries'}) — please review before exporting.`);
     } catch {
       toast.error('Failed to extract data. Please try again.');
       setStep('capture');
@@ -288,8 +289,9 @@ const Index = () => {
     const record: ScanRecord = {
       id: crypto.randomUUID(),
       type: docType,
-      imageUrl: imageUrl || batchQueue[0]?.previewUrl || '',
+      imageUrl: filePreviewUrl || batchQueue[0]?.previewUrl || '',
       data: typedData,
+      meta: extractionMeta,
       createdAt: new Date(),
     };
 
@@ -307,11 +309,11 @@ const Index = () => {
 
   const reset = useCallback(() => {
     setStep('home');
-    setImageFile(null);
-    setImageUrl('');
+    setFilePreviewUrl('');
     setData([]);
     setBusinessCardFilter('all');
     setCaptureMode('single');
+    setExtractionMeta(undefined);
     setBatchProgress(emptySnapshot);
     setBatchQueue((current) => {
       revokeQueuePreviewUrls(current);
@@ -672,9 +674,9 @@ const Index = () => {
               </div>
             )}
 
-            {imageUrl && (
+            {filePreviewUrl && (
               <div className="rounded-lg overflow-hidden border border-border">
-                <img src={imageUrl} alt="Scanned document" className="w-full max-h-48 object-contain bg-secondary" />
+                <img src={filePreviewUrl} alt="Scanned document" className="w-full max-h-48 object-contain bg-secondary" />
               </div>
             )}
 
@@ -682,6 +684,7 @@ const Index = () => {
               docType={docType}
               data={data}
               onChange={setData}
+              meta={extractionMeta}
               businessCardFilter={businessCardFilter}
               onBusinessCardFilterChange={setBusinessCardFilter}
               onReviewProblemRows={() => setBusinessCardFilter('needs_review')}

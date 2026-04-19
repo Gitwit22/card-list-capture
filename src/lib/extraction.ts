@@ -1,35 +1,32 @@
-import { BatchItem, BatchProgressSnapshot, DocumentType, SignupEntry, BusinessCardEntry } from '@/types/scan';
+import {
+  BatchItem,
+  BatchProgressSnapshot,
+  BusinessCardEntry,
+  DocumentType,
+  ExtractionMeta,
+  HeaderMapping,
+  SignupEntry,
+} from '@/types/scan';
+import { getConfig } from '@/config/env';
 
-const MAX_IMAGE_SIZE_MB = 20;
+interface SigninProcessResponse {
+  status: string;
+  structure: string;
+  detectedHeaders: string[];
+  headerMapping: HeaderMapping[];
+  rows: Array<Record<string, unknown>>;
+  rawRows?: Array<Record<string, string>>;
+  confidence: number;
+}
 
-const DOC_INTEL_URL = import.meta.env.VITE_DOC_INTEL_URL as string;
-const DOC_INTEL_TOKEN = import.meta.env.VITE_DOC_INTEL_TOKEN as string;
-
-const SIGNUP_SCHEMA = {
-  fields: [
-    { key: 'fullName', description: 'Full name of the person' },
-    { key: 'organization', description: 'Organization or company affiliation' },
-    { key: 'phone', description: 'Phone number' },
-    { key: 'email', description: 'Email address' },
-    { key: 'screening', description: 'Screening or waiver checkbox' },
-    { key: 'shareInfo', description: 'Consent to share contact information' },
-    { key: 'date', description: 'Date signed up' },
-    { key: 'comments', description: 'Any comments or notes' },
-  ],
-};
-
-const BUSINESS_CARD_SCHEMA = {
-  fields: [
-    { key: 'firstName', description: 'First name' },
-    { key: 'lastName', description: 'Last name' },
-    { key: 'company', description: 'Company or organization name' },
-    { key: 'title', description: 'Job title or role' },
-    { key: 'phone', description: 'Phone number' },
-    { key: 'email', description: 'Email address' },
-    { key: 'website', description: 'Website URL' },
-    { key: 'address', description: 'Mailing or street address' },
-  ],
-};
+interface BusinessCardProcessResponse {
+  status: string;
+  structure: string;
+  detectedHeaders: string[];
+  headerMapping: HeaderMapping[];
+  card: Record<string, unknown>;
+  confidence: number;
+}
 
 interface ExtractionField {
   key: string;
@@ -42,66 +39,37 @@ interface ExtractionResponse {
   fields: ExtractionField[];
 }
 
-interface SigninProcessResponse {
-  status: string;
-  rows: Array<{
-    fullName?: string;
-    organization?: string;
-    phone?: string;
-    email?: string;
-    screening?: string;
-    shareInfo?: string;
-    date?: string;
-    comments?: string;
-  }>;
-  structure?: string;
-  detectedHeaders?: string[];
-  headerMapping?: Record<string, string>;
-}
-
-interface BusinessCardProcessResponse {
-  status: string;
-  card?: {
-    firstName?: string;
-    lastName?: string;
-    company?: string;
-    title?: string;
-    phone?: string;
-    email?: string;
-    website?: string;
-    address?: string;
-  };
-  structure?: string;
-  detectedHeaders?: string[];
-  headerMapping?: Record<string, string>;
+export interface ExtractionResult<T> {
+  entries: T[];
+  meta: ExtractionMeta;
 }
 
 export async function extractFromImage(
-  imageFile: File,
-  docType: DocumentType
-): Promise<SignupEntry[] | BusinessCardEntry[]> {
-  if (imageFile.size > MAX_IMAGE_SIZE_MB * 1024 * 1024) {
-    throw new Error(`Image exceeds ${MAX_IMAGE_SIZE_MB} MB limit.`);
+  file: File,
+  docType: DocumentType,
+): Promise<ExtractionResult<SignupEntry> | ExtractionResult<BusinessCardEntry>> {
+  const maxSizeMb = getConfig().cardCapture.maxFileSizeMb;
+  if (file.size > maxSizeMb * 1024 * 1024) {
+    throw new Error(`File exceeds ${maxSizeMb} MB limit.`);
   }
+
+  const DOC_INTEL_URL = import.meta.env.VITE_DOC_INTEL_URL as string;
+  const DOC_INTEL_TOKEN = import.meta.env.VITE_DOC_INTEL_TOKEN as string;
 
   if (!DOC_INTEL_URL || !DOC_INTEL_TOKEN) {
-    console.warn('[Scan2Sheet] DOC_INTEL env vars not set â€” falling back to empty entries.');
+    console.warn('[Scan2Sheet] DOC_INTEL env vars not set — falling back to empty entries.');
     return docType === 'business-card'
-      ? [createEmptyBusinessCard()]
-      : [createEmptySignupEntry(), createEmptySignupEntry(), createEmptySignupEntry()];
+      ? { entries: [createEmptyBusinessCard()], meta: emptyMeta() }
+      : { entries: [createEmptySignupEntry(), createEmptySignupEntry(), createEmptySignupEntry()], meta: emptyMeta() };
   }
 
-  const schema = docType === 'business-card' ? BUSINESS_CARD_SCHEMA : SIGNUP_SCHEMA;
-
   const formData = new FormData();
-  formData.append('file', imageFile);
-  formData.append('schema', JSON.stringify(schema));
+  formData.append('file', file);
 
   const processPath = docType === 'business-card'
     ? '/process/business-card'
     : '/process/signin-sheet';
 
-  // Prefer specialized workflow endpoints first, then fallback to generic extract.
   const processRes = await fetch(`${DOC_INTEL_URL}${processPath}`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${DOC_INTEL_TOKEN}` },
@@ -111,57 +79,73 @@ export async function extractFromImage(
   if (processRes.ok) {
     if (docType === 'business-card') {
       const result: BusinessCardProcessResponse = await processRes.json();
-      if (process.env.NODE_ENV !== 'production') {
-        console.debug('[Scan2Sheet] business-card response:', {
-          structure: result.structure,
-          detectedHeaders: result.detectedHeaders,
-          headerMapping: result.headerMapping,
-        });
-      }
-      const card = result.card ?? {};
-      return [
-        {
-          id: crypto.randomUUID(),
-          firstName: card.firstName ?? '',
-          lastName: card.lastName ?? '',
-          company: card.company ?? '',
-          title: card.title ?? '',
-          phone: card.phone ?? '',
-          email: card.email ?? '',
-          website: card.website ?? '',
-          address: card.address ?? '',
-        },
-      ];
+      logExtractionDebug('business-card', result);
+
+      const card = mapBusinessCard(result.card ?? {});
+      const meta: ExtractionMeta = {
+        structure: (result.structure as ExtractionMeta['structure']) ?? 'single-entity',
+        detectedHeaders: result.detectedHeaders ?? [],
+        headerMapping: result.headerMapping ?? [],
+        confidence: result.confidence ?? 0,
+      };
+      return { entries: [card], meta };
     }
 
     const result: SigninProcessResponse = await processRes.json();
-    if (process.env.NODE_ENV !== 'production') {
-      console.debug('[Scan2Sheet] signin-sheet response:', {
-        structure: result.structure,
-        detectedHeaders: result.detectedHeaders,
-        headerMapping: result.headerMapping,
-        rowCount: result.rows?.length,
-      });
-    }
+    logExtractionDebug('signup-sheet', result);
+
     if (Array.isArray(result.rows) && result.rows.length > 0) {
-      return result.rows.map((row) => ({
-        id: crypto.randomUUID(),
-        fullName: row.fullName ?? '',
-        organization: row.organization ?? '',
-        phone: row.phone ?? '',
-        email: row.email ?? '',
-        screening: row.screening ?? '',
-        shareInfo: row.shareInfo ?? '',
-        date: row.date ?? '',
-        comments: row.comments ?? '',
-      }));
+      const entries = result.rows.map(mapSignupRow);
+      const meta: ExtractionMeta = {
+        structure: (result.structure as ExtractionMeta['structure']) ?? 'table',
+        detectedHeaders: result.detectedHeaders ?? [],
+        headerMapping: result.headerMapping ?? [],
+        confidence: result.confidence ?? 0,
+        rawRows: result.rawRows,
+      };
+      return { entries, meta };
     }
   }
+
+  console.warn('[Scan2Sheet] Specialized endpoint failed or returned no data — trying /extract fallback.');
+
+  const fallbackFormData = new FormData();
+  fallbackFormData.append('file', file);
+
+  const schema = docType === 'business-card'
+    ? {
+        fields: [
+          { key: 'fullName', description: 'Full name' },
+          { key: 'firstName', description: 'First name' },
+          { key: 'lastName', description: 'Last name' },
+          { key: 'company', description: 'Company or organization name' },
+          { key: 'title', description: 'Job title or role' },
+          { key: 'phone', description: 'Phone number' },
+          { key: 'email', description: 'Email address' },
+          { key: 'website', description: 'Website URL' },
+          { key: 'address', description: 'Mailing or street address' },
+          { key: 'social', description: 'Social media handle or URL' },
+        ],
+      }
+    : {
+        fields: [
+          { key: 'fullName', description: 'Full name of the person' },
+          { key: 'organization', description: 'Organization or company affiliation' },
+          { key: 'phone', description: 'Phone number' },
+          { key: 'email', description: 'Email address' },
+          { key: 'screening', description: 'Screening or waiver checkbox' },
+          { key: 'shareInfo', description: 'Consent to share contact information' },
+          { key: 'date', description: 'Date signed up' },
+          { key: 'comments', description: 'Any comments or notes' },
+        ],
+      };
+
+  fallbackFormData.append('schema', JSON.stringify(schema));
 
   const res = await fetch(`${DOC_INTEL_URL}/extract`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${DOC_INTEL_TOKEN}` },
-    body: formData,
+    body: fallbackFormData,
   });
 
   if (!res.ok) {
@@ -172,45 +156,69 @@ export async function extractFromImage(
   const result: ExtractionResponse = await res.json();
 
   if (result.status !== 'complete' || !result.fields?.length) {
-    console.warn('[Scan2Sheet] Extraction returned no fields â€” returning empty entry.');
+    console.warn('[Scan2Sheet] Extraction returned no fields — returning empty entry.');
     return docType === 'business-card'
-      ? [createEmptyBusinessCard()]
-      : [createEmptySignupEntry()];
+      ? { entries: [createEmptyBusinessCard()], meta: emptyMeta('fallback') }
+      : { entries: [createEmptySignupEntry()], meta: emptyMeta('fallback') };
   }
 
-  const fieldMap = Object.fromEntries(
-    result.fields.map((f) => [f.key, f.value ?? ''])
-  );
+  const fieldMap = Object.fromEntries(result.fields.map((f) => [f.key, f.value ?? '']));
+
+  const knownKeys = new Set(schema.fields.map((f) => f.key));
+  const extraFields: Record<string, string> = {};
+  for (const [key, value] of Object.entries(fieldMap)) {
+    if (!knownKeys.has(key) && value) {
+      extraFields[key] = value;
+    }
+  }
+
+  const meta: ExtractionMeta = {
+    structure: 'unstructured',
+    detectedHeaders: [],
+    headerMapping: [],
+    confidence: 0.3,
+  };
 
   if (docType === 'business-card') {
-    return [
-      {
-        id: crypto.randomUUID(),
-        firstName: fieldMap['firstName'] ?? '',
-        lastName: fieldMap['lastName'] ?? '',
-        company: fieldMap['company'] ?? '',
-        title: fieldMap['title'] ?? '',
-        phone: fieldMap['phone'] ?? '',
-        email: fieldMap['email'] ?? '',
-        website: fieldMap['website'] ?? '',
-        address: fieldMap['address'] ?? '',
-      },
-    ];
+    return {
+      entries: [
+        {
+          ...createEmptyBusinessCard(),
+          fullName: fieldMap.fullName ?? '',
+          firstName: fieldMap.firstName ?? '',
+          lastName: fieldMap.lastName ?? '',
+          company: fieldMap.company ?? '',
+          title: fieldMap.title ?? '',
+          phone: fieldMap.phone ?? '',
+          email: fieldMap.email ?? '',
+          website: fieldMap.website ?? '',
+          address: fieldMap.address ?? '',
+          social: fieldMap.social ?? '',
+          extraFields,
+          rawText: '',
+        },
+      ],
+      meta,
+    };
   }
 
-  return [
-    {
-      id: crypto.randomUUID(),
-      fullName: fieldMap['fullName'] ?? '',
-      organization: fieldMap['organization'] ?? '',
-      phone: fieldMap['phone'] ?? '',
-      email: fieldMap['email'] ?? '',
-      screening: fieldMap['screening'] ?? '',
-      shareInfo: fieldMap['shareInfo'] ?? '',
-      date: fieldMap['date'] ?? '',
-      comments: fieldMap['comments'] ?? '',
-    },
-  ];
+  return {
+    entries: [
+      {
+        ...createEmptySignupEntry(),
+        fullName: fieldMap.fullName ?? '',
+        organization: fieldMap.organization ?? '',
+        phone: fieldMap.phone ?? '',
+        email: fieldMap.email ?? '',
+        screening: fieldMap.screening ?? '',
+        shareInfo: fieldMap.shareInfo ?? '',
+        date: fieldMap.date ?? '',
+        comments: fieldMap.comments ?? '',
+        extraFields,
+      },
+    ],
+    meta,
+  };
 }
 
 export interface BatchExtractionOptions {
@@ -252,7 +260,7 @@ function getBatchSnapshot(items: BatchItem[]): BatchProgressSnapshot {
 function withBusinessCardMetadata(item: BatchItem, rows: BusinessCardEntry[]): BusinessCardEntry[] {
   const sourceLabel = item.filename || `Image ${item.index + 1}`;
   return rows.map((row) => {
-    const hasCoreFields = [row.firstName, row.lastName, row.company, row.email, row.phone]
+    const hasCoreFields = [row.fullName, row.firstName, row.lastName, row.company, row.email, row.phone]
       .some((value) => (value ?? '').trim().length > 0);
     const rowNeedsReview = item.needsReview || !hasCoreFields;
 
@@ -269,7 +277,7 @@ function withBusinessCardMetadata(item: BatchItem, rows: BusinessCardEntry[]): B
 
 export async function extractBusinessCardBatch(
   items: BatchItem[],
-  options: BatchExtractionOptions = {}
+  options: BatchExtractionOptions = {},
 ): Promise<BatchExtractionResult> {
   const targetIds = new Set(options.itemIds ?? items.map((item) => item.id));
   const targetItems = items.filter((item) => targetIds.has(item.id));
@@ -299,7 +307,8 @@ export async function extractBusinessCardBatch(
       options.onProgress?.(getBatchSnapshot(items));
 
       try {
-        const rows = await extractFromImage(item.file, 'business-card') as BusinessCardEntry[];
+        const result = await extractFromImage(item.file, 'business-card');
+        const rows = result.entries as BusinessCardEntry[];
         const normalizedRows = withBusinessCardMetadata(item, rows);
         const needsReview = normalizedRows.some((row) => row.needsReview);
 
@@ -350,6 +359,41 @@ export function getDefaultBatchConcurrency() {
   return DEFAULT_BATCH_CONCURRENCY;
 }
 
+function mapSignupRow(row: Record<string, unknown>): SignupEntry {
+  const extra = (row.extraFields ?? {}) as Record<string, string>;
+  return {
+    id: String(row.id ?? crypto.randomUUID()),
+    fullName: String(row.fullName ?? ''),
+    organization: String(row.organization ?? ''),
+    phone: String(row.phone ?? ''),
+    email: String(row.email ?? ''),
+    screening: String(row.screening ?? ''),
+    shareInfo: String(row.shareInfo ?? ''),
+    date: String(row.date ?? ''),
+    comments: String(row.comments ?? ''),
+    extraFields: extra,
+  };
+}
+
+function mapBusinessCard(card: Record<string, unknown>): BusinessCardEntry {
+  const extra = (card.extraFields ?? {}) as Record<string, string>;
+  return {
+    id: String(card.id ?? crypto.randomUUID()),
+    fullName: String(card.fullName ?? ''),
+    firstName: String(card.firstName ?? ''),
+    lastName: String(card.lastName ?? ''),
+    company: String(card.company ?? ''),
+    title: String(card.title ?? ''),
+    phone: String(card.phone ?? ''),
+    email: String(card.email ?? ''),
+    website: String(card.website ?? ''),
+    address: String(card.address ?? ''),
+    social: String(card.social ?? ''),
+    extraFields: extra,
+    rawText: String(card.rawText ?? ''),
+  };
+}
+
 export function createEmptySignupEntry(): SignupEntry {
   return {
     id: crypto.randomUUID(),
@@ -361,12 +405,14 @@ export function createEmptySignupEntry(): SignupEntry {
     shareInfo: '',
     date: '',
     comments: '',
+    extraFields: {},
   };
 }
 
 export function createEmptyBusinessCard(): BusinessCardEntry {
   return {
     id: crypto.randomUUID(),
+    fullName: '',
     firstName: '',
     lastName: '',
     company: '',
@@ -375,5 +421,31 @@ export function createEmptyBusinessCard(): BusinessCardEntry {
     email: '',
     website: '',
     address: '',
+    social: '',
+    extraFields: {},
+    rawText: '',
   };
+}
+
+function emptyMeta(_note?: string): ExtractionMeta {
+  return {
+    structure: 'unstructured',
+    detectedHeaders: [],
+    headerMapping: [],
+    confidence: 0,
+  };
+}
+
+function logExtractionDebug(docType: string, response: unknown): void {
+  if (import.meta.env.DEV || import.meta.env.VITE_DEBUG_EXTRACTION === 'true') {
+    const data = response as Record<string, unknown>;
+    console.group(`[Scan2Sheet] ${docType} extraction result`);
+    console.log('structure:', data.structure);
+    console.log('detectedHeaders:', data.detectedHeaders);
+    console.log('headerMapping:', data.headerMapping);
+    console.log('confidence:', data.confidence);
+    console.log('rows/card:', data.rows ?? data.card);
+    console.log('rawRows:', data.rawRows);
+    console.groupEnd();
+  }
 }
