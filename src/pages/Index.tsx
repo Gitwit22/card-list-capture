@@ -86,8 +86,8 @@ const Index = () => {
   const [captureMode, setCaptureMode] = useState<BusinessCardCaptureMode>('single');
   const [filePreviewUrl, setFilePreviewUrl] = useState<string>('');
   const [data, setData] = useState<(SignupEntry | BusinessCardEntry)[]>([]);
-  const [businessCardFilter, setBusinessCardFilter] = useState<BusinessCardFilter>('all');
   const [extractionMeta, setExtractionMeta] = useState<ExtractionMeta | undefined>();
+  const [businessCardFilter, setBusinessCardFilter] = useState<BusinessCardFilter>('all');
   const [history, setHistory] = useState<ScanRecord[]>([]);
   const [batchQueue, setBatchQueue] = useState<BatchItem[]>([]);
   const [batchProgress, setBatchProgress] = useState<BatchProgressSnapshot>(emptySnapshot);
@@ -115,13 +115,14 @@ const Index = () => {
       try {
         URL.revokeObjectURL(item.previewUrl);
       } catch {
-        // Ignore failed URL cleanup in browser environments where URLs are already released.
+        // Ignore URL cleanup errors.
       }
     });
   }, []);
 
   const buildReviewRowsFromQueue = useCallback((queue: BatchItem[]) => {
     const rows: BusinessCardEntry[] = [];
+
     queue.forEach((item) => {
       if (item.extractedRows.length > 0) {
         rows.push(...item.extractedRows);
@@ -140,6 +141,7 @@ const Index = () => {
         });
       }
     });
+
     return rows;
   }, []);
 
@@ -158,6 +160,7 @@ const Index = () => {
         filename: capture.file.name,
         index: nextIndexStart + idx,
       }));
+
       return [...current, ...newItems];
     });
   }, []);
@@ -168,6 +171,7 @@ const Index = () => {
       if (target) {
         URL.revokeObjectURL(target.previewUrl);
       }
+
       return current
         .filter((item) => item.id !== id)
         .map((item, index) => ({ ...item, index }));
@@ -181,6 +185,7 @@ const Index = () => {
     });
     setBatchProgress(emptySnapshot);
     setData([]);
+    setExtractionMeta(undefined);
     setBusinessCardFilter('all');
   }, [revokeQueuePreviewUrls]);
 
@@ -193,6 +198,7 @@ const Index = () => {
 
     setStep('batch-processing');
     setIsBatchProcessing(true);
+    setExtractionMeta(undefined);
 
     const resetTargetIds = new Set(targetIds);
     setBatchQueue((current) => current.map((item) => {
@@ -221,9 +227,10 @@ const Index = () => {
         onProgress: setBatchProgress,
       });
 
-      setBatchQueue(result.items.map((item, index) => ({ ...item, index })));
+      const nextItems = result.items.map((item, index) => ({ ...item, index }));
+      setBatchQueue(nextItems);
 
-      const rows = buildReviewRowsFromQueue(result.items);
+      const rows = buildReviewRowsFromQueue(nextItems);
       setData(rows);
       setBusinessCardFilter(rows.some((row) => row.status === 'failed' || row.status === 'needs_review') ? 'needs_review' : 'all');
       setStep('review');
@@ -247,6 +254,7 @@ const Index = () => {
       toast.info('No failed items to retry.');
       return;
     }
+
     await processBatch(failedIds);
   }, [batchQueue, processBatch]);
 
@@ -257,10 +265,10 @@ const Index = () => {
     try {
       const result = await extractFromImage(file, docType);
       setData(result.entries);
-    setBusinessCardFilter('all');
       setExtractionMeta(result.meta);
+      setBusinessCardFilter('all');
       setStep('review');
-      toast.info(`Data extracted (${result.entries.length} ${result.entries.length === 1 ? 'entry' : 'entries'}) — please review before exporting.`);
+      toast.info(`Data extracted (${result.entries.length} ${result.entries.length === 1 ? 'entry' : 'entries'}) - please review before exporting.`);
     } catch {
       toast.error('Failed to extract data. Please try again.');
       setStep('capture');
@@ -311,9 +319,9 @@ const Index = () => {
     setStep('home');
     setFilePreviewUrl('');
     setData([]);
+    setExtractionMeta(undefined);
     setBusinessCardFilter('all');
     setCaptureMode('single');
-    setExtractionMeta(undefined);
     setBatchProgress(emptySnapshot);
     setBatchQueue((current) => {
       revokeQueuePreviewUrls(current);
@@ -321,15 +329,13 @@ const Index = () => {
     });
   }, [revokeQueuePreviewUrls]);
 
-  const queueCounts = useMemo(() => {
-    return {
-      queued: batchQueue.filter((item) => item.status === 'queued').length,
-      processing: batchQueue.filter((item) => item.status === 'processing').length,
-      done: batchQueue.filter((item) => item.status === 'done').length,
-      failed: batchQueue.filter((item) => item.status === 'failed').length,
-      needsReview: batchQueue.filter((item) => item.status === 'needs_review').length,
-    };
-  }, [batchQueue]);
+  const queueCounts = useMemo(() => ({
+    queued: batchQueue.filter((item) => item.status === 'queued').length,
+    processing: batchQueue.filter((item) => item.status === 'processing').length,
+    done: batchQueue.filter((item) => item.status === 'done').length,
+    failed: batchQueue.filter((item) => item.status === 'failed').length,
+    needsReview: batchQueue.filter((item) => item.status === 'needs_review').length,
+  }), [batchQueue]);
 
   const batchProgressPercent = batchProgress.total === 0
     ? 0
@@ -339,7 +345,6 @@ const Index = () => {
 
   return (
     <div className="min-h-screen bg-background">
-      {/* Header */}
       <header className="sticky top-0 z-50 bg-card/80 backdrop-blur-md border-b border-border">
         <div className="max-w-2xl mx-auto px-4 h-14 flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -372,7 +377,6 @@ const Index = () => {
       </header>
 
       <main className="max-w-2xl mx-auto px-4 py-8">
-        {/* HOME */}
         {step === 'home' && (
           <div className="space-y-8">
             <div className="text-center space-y-2">
@@ -412,7 +416,6 @@ const Index = () => {
           </div>
         )}
 
-        {/* CAPTURE */}
         {step === 'capture' && (
           <div className="space-y-6">
             <div>
@@ -421,7 +424,7 @@ const Index = () => {
               </h2>
               <p className="text-sm text-muted-foreground mt-1">
                 {docType === 'signup-sheet'
-                  ? 'Take a photo or upload an image of the document.'
+                  ? 'Take a photo or upload a file (image, PDF, Excel, Word, etc.).'
                   : 'Choose how you want to capture business cards.'}
               </p>
             </div>
@@ -438,9 +441,7 @@ const Index = () => {
                       onClick={() => setCaptureMode(modeOption.key)}
                       className={cn(
                         'rounded-lg border p-4 text-left transition-colors',
-                        active
-                          ? 'border-primary bg-primary/5'
-                          : 'border-border bg-card hover:border-primary/40'
+                        active ? 'border-primary bg-primary/5' : 'border-border bg-card hover:border-primary/40',
                       )}
                     >
                       <Icon className="w-4 h-4 mb-2 text-primary" />
@@ -491,7 +492,6 @@ const Index = () => {
           </div>
         )}
 
-        {/* BATCH QUEUE */}
         {step === 'batch-queue' && (
           <div className="space-y-6">
             <div>
@@ -541,7 +541,7 @@ const Index = () => {
                       <p className="text-sm font-medium text-foreground truncate">
                         {item.filename || `Image ${index + 1}`}
                       </p>
-                      <p className="text-xs text-muted-foreground">#{index + 1} · {item.sourceType === 'camera' ? 'Camera' : 'Upload'}</p>
+                      <p className="text-xs text-muted-foreground">#{index + 1} - {item.sourceType === 'camera' ? 'Camera' : 'Upload'}</p>
                       <Badge
                         variant={
                           item.status === 'failed'
@@ -575,7 +575,6 @@ const Index = () => {
           </div>
         )}
 
-        {/* PROCESSING */}
         {step === 'processing' && (
           <div className="flex flex-col items-center justify-center py-20 space-y-4">
             <div className="w-16 h-16 rounded-full scan-gradient flex items-center justify-center animate-pulse">
@@ -588,7 +587,6 @@ const Index = () => {
           </div>
         )}
 
-        {/* BATCH PROCESSING */}
         {step === 'batch-processing' && (
           <div className="space-y-5">
             <div className="flex items-center gap-3">
@@ -638,7 +636,6 @@ const Index = () => {
           </div>
         )}
 
-        {/* REVIEW */}
         {step === 'review' && (
           <div className="space-y-6">
             <div>
@@ -709,7 +706,6 @@ const Index = () => {
           </div>
         )}
 
-        {/* HISTORY */}
         {step === 'history' && (
           <div className="space-y-4">
             <h2 className="text-xl font-semibold text-foreground">Scan History</h2>
