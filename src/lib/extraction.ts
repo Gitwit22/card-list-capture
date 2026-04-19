@@ -108,7 +108,7 @@ export async function extractFromImage(
     }
   }
 
-  console.warn('[Scan2Sheet] Specialized endpoint failed or returned no data � trying /extract fallback.');
+  console.warn('[Scan2Sheet] Specialized endpoint failed or returned no data - trying /extract fallback.');
 
   const fallbackFormData = new FormData();
   fallbackFormData.append('file', file);
@@ -157,7 +157,7 @@ export async function extractFromImage(
   const result: ExtractionResponse = await res.json();
 
   if (result.status !== 'complete' || !result.fields?.length) {
-    console.warn('[Scan2Sheet] Extraction returned no fields � returning empty entry.');
+    console.warn('[Scan2Sheet] Extraction returned no fields - returning empty entry.');
     return docType === 'business-card'
       ? { entries: [createEmptyBusinessCard()], meta: emptyMeta('fallback') }
       : { entries: [createEmptySignupEntry()], meta: emptyMeta('fallback') };
@@ -450,6 +450,10 @@ function normalizeKey(key: string): string {
   return key.toLowerCase().replace(/[^a-z0-9]/g, '');
 }
 
+function isNonEmpty(value: unknown): boolean {
+  return value !== undefined && value !== null && String(value).trim() !== '';
+}
+
 function asCleanString(value: unknown): string {
   if (value === null || value === undefined) return '';
   if (typeof value === 'string') return value.trim();
@@ -457,20 +461,201 @@ function asCleanString(value: unknown): string {
   return '';
 }
 
-function pickFieldValue(
+function looksLikeEmail(value: string): boolean {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim());
+}
+
+function looksLikePhone(value: string): boolean {
+  const digits = value.replace(/\D/g, '');
+  return digits.length >= 10 && digits.length <= 15;
+}
+
+function looksLikeWebsite(value: string): boolean {
+  const trimmed = value.trim();
+  return /^(https?:\/\/|www\.)/i.test(trimmed) || /\.[a-z]{2,}(\/|$)/i.test(trimmed);
+}
+
+type CanonicalField =
+  | 'fullName'
+  | 'organization'
+  | 'email'
+  | 'phone'
+  | 'jobTitle'
+  | 'address'
+  | 'website'
+  | 'comments';
+
+type DynamicMappedRow = {
+  fullName: string;
+  organization: string;
+  email: string;
+  phone: string;
+  jobTitle: string;
+  address: string;
+  website: string;
+  comments: string;
+  usedNormalizedKeys: Set<string>;
+};
+
+function guessFieldFromHeader(header: string): CanonicalField | null {
+  const h = normalizeKey(header);
+
+  const matchers: Array<[CanonicalField, RegExp[]]> = [
+    [
+      'fullName',
+      [
+        /^(name|fullname|contactname|personname|participantname|attendee|contact|person)$/,
+        /name/,
+      ],
+    ],
+    [
+      'organization',
+      [
+        /^(organization|org|company|business|affiliation|employer|agency|institution)$/,
+        /company|business|organization|affiliation|employer|agency|institution|org/,
+      ],
+    ],
+    [
+      'email',
+      [
+        /^(email|emailaddress|mail|contactemail)$/,
+        /email|mail/,
+      ],
+    ],
+    [
+      'phone',
+      [
+        /^(phone|phonenumber|mobile|cell|telephone|tel|contactnumber)$/,
+        /phone|mobile|cell|telephone|tel|number/,
+      ],
+    ],
+    [
+      'jobTitle',
+      [
+        /^(title|jobtitle|position|role)$/,
+        /title|position|role/,
+      ],
+    ],
+    [
+      'address',
+      [
+        /^(address|street|location|mailingaddress)$/,
+        /address|street|location/,
+      ],
+    ],
+    [
+      'website',
+      [
+        /^(website|web|url|site|companywebsite)$/,
+        /website|web|url|site/,
+      ],
+    ],
+    [
+      'comments',
+      [
+        /^(comments|comment|notes|note|remarks|message)$/,
+        /comment|note|remark|message/,
+      ],
+    ],
+  ];
+
+  for (const [field, patterns] of matchers) {
+    if (patterns.some((pattern) => pattern.test(h))) return field;
+  }
+
+  return null;
+}
+
+function mapDynamicRow(raw: Record<string, unknown>): DynamicMappedRow {
+  const result: DynamicMappedRow = {
+    fullName: '',
+    organization: '',
+    email: '',
+    phone: '',
+    jobTitle: '',
+    address: '',
+    website: '',
+    comments: '',
+    usedNormalizedKeys: new Set<string>(),
+  };
+
+  for (const [key, value] of Object.entries(raw)) {
+    if (!isNonEmpty(value)) continue;
+
+    const field = guessFieldFromHeader(key);
+    if (field && !result[field]) {
+      result[field] = asCleanString(value);
+      result.usedNormalizedKeys.add(normalizeKey(key));
+    }
+  }
+
+  for (const [key, value] of Object.entries(raw)) {
+    const normalizedKey = normalizeKey(key);
+    if (result.usedNormalizedKeys.has(normalizedKey) || !isNonEmpty(value)) continue;
+
+    const str = asCleanString(value);
+
+    if (!result.email && looksLikeEmail(str)) {
+      result.email = str;
+      result.usedNormalizedKeys.add(normalizedKey);
+      continue;
+    }
+
+    if (!result.phone && looksLikePhone(str)) {
+      result.phone = str;
+      result.usedNormalizedKeys.add(normalizedKey);
+      continue;
+    }
+
+    if (!result.website && looksLikeWebsite(str)) {
+      result.website = str;
+      result.usedNormalizedKeys.add(normalizedKey);
+      continue;
+    }
+  }
+
+  return result;
+}
+
+function pickFieldFromUnusedHeaders(
   source: Record<string, unknown>,
+  usedKeys: Set<string>,
   aliases: string[],
-): { value: string; matchedKey: string | null } {
+): string {
   const normalizedAliasSet = new Set(aliases.map(normalizeKey));
 
   for (const [key, rawValue] of Object.entries(source)) {
-    if (!normalizedAliasSet.has(normalizeKey(key))) continue;
+    const normalizedKey = normalizeKey(key);
+    if (usedKeys.has(normalizedKey)) continue;
+    if (!normalizedAliasSet.has(normalizedKey)) continue;
     const value = asCleanString(rawValue);
     if (!value) continue;
-    return { value, matchedKey: key };
+    usedKeys.add(normalizedKey);
+    return value;
   }
 
-  return { value: '', matchedKey: null };
+  return '';
+}
+
+function collectExtraFields(
+  source: Record<string, unknown>,
+  usedKeys: Set<string>,
+  reservedNormalized: string[] = [],
+): Record<string, string> {
+  const reserved = new Set(reservedNormalized);
+  const extraFields: Record<string, string> = {};
+
+  for (const [key, rawValue] of Object.entries(source)) {
+    const normalizedKey = normalizeKey(key);
+    if (usedKeys.has(normalizedKey) || reserved.has(normalizedKey)) continue;
+
+    const value = asCleanString(rawValue);
+    if (!value) continue;
+
+    extraFields[key] = value;
+  }
+
+  return extraFields;
 }
 
 function mapSignupRow(row: Record<string, unknown>): SignupEntry {
@@ -480,96 +665,49 @@ function mapSignupRow(row: Record<string, unknown>): SignupEntry {
     ...row,
   };
 
-  const fullName = pickFieldValue(mergedSource, [
-    'fullName',
-    'name',
-    'participantName',
-    'attendeeName',
-    'contactName',
-    'personName',
-    'signature',
-  ]);
-  const organization = pickFieldValue(mergedSource, [
-    'organization',
-    'org',
-    'company',
-    'business',
-    'affiliation',
-    'organizationName',
-    'companyName',
-    'employer',
-    'agency',
-  ]);
-  const phone = pickFieldValue(mergedSource, [
-    'phone',
-    'phoneNumber',
-    'mobile',
-    'cell',
-    'telephone',
-  ]);
-  const email = pickFieldValue(mergedSource, [
-    'email',
-    'emailAddress',
-    'e-mail',
-  ]);
-  const screening = pickFieldValue(mergedSource, [
+  const mapped = mapDynamicRow(mergedSource);
+  const usedKeys = new Set(mapped.usedNormalizedKeys);
+
+  const screening = pickFieldFromUnusedHeaders(mergedSource, usedKeys, [
     'screening',
     'screeningStatus',
     'screened',
     'waiver',
   ]);
-  const shareInfo = pickFieldValue(mergedSource, [
+  const shareInfo = pickFieldFromUnusedHeaders(mergedSource, usedKeys, [
     'shareInfo',
     'shareInformation',
     'shareContact',
     'consentToShare',
     'optIn',
   ]);
-  const date = pickFieldValue(mergedSource, [
+  const date = pickFieldFromUnusedHeaders(mergedSource, usedKeys, [
     'date',
     'signupDate',
     'signDate',
     'timestamp',
   ]);
-  const comments = pickFieldValue(mergedSource, [
+  const comments = mapped.comments || pickFieldFromUnusedHeaders(mergedSource, usedKeys, [
     'comments',
     'comment',
     'notes',
     'note',
     'message',
+    'remarks',
   ]);
 
-  const reservedNormalized = new Set([
-    'id',
-    'extrafields',
-    ...(fullName.matchedKey ? [normalizeKey(fullName.matchedKey)] : []),
-    ...(organization.matchedKey ? [normalizeKey(organization.matchedKey)] : []),
-    ...(phone.matchedKey ? [normalizeKey(phone.matchedKey)] : []),
-    ...(email.matchedKey ? [normalizeKey(email.matchedKey)] : []),
-    ...(screening.matchedKey ? [normalizeKey(screening.matchedKey)] : []),
-    ...(shareInfo.matchedKey ? [normalizeKey(shareInfo.matchedKey)] : []),
-    ...(date.matchedKey ? [normalizeKey(date.matchedKey)] : []),
-    ...(comments.matchedKey ? [normalizeKey(comments.matchedKey)] : []),
-  ]);
-
-  const extraFields: Record<string, string> = {};
-  for (const [key, rawValue] of Object.entries(mergedSource)) {
-    if (reservedNormalized.has(normalizeKey(key))) continue;
-    const value = asCleanString(rawValue);
-    if (!value) continue;
-    extraFields[key] = value;
-  }
+  const extraFields = collectExtraFields(mergedSource, usedKeys, ['id', 'extrafields']);
 
   return {
     id: String(row.id ?? crypto.randomUUID()),
-    fullName: fullName.value,
-    organization: organization.value,
-    phone: phone.value,
-    email: email.value,
-    screening: screening.value,
-    shareInfo: shareInfo.value,
-    date: date.value,
-    comments: comments.value,
+    fullName: mapped.fullName,
+    organization: mapped.organization,
+    phone: mapped.phone,
+    email: mapped.email,
+    screening,
+    shareInfo,
+    date,
+    comments,
     extraFields,
   };
 }
@@ -581,91 +719,29 @@ function mapBusinessCard(card: Record<string, unknown>): BusinessCardEntry {
     ...card,
   };
 
-  const fullName = pickFieldValue(mergedSource, [
-    'fullName',
-    'name',
-    'contactName',
-    'personName',
-    'cardholderName',
-  ]);
-  const company = pickFieldValue(mergedSource, [
-    'company',
-    'organization',
-    'org',
-    'business',
-    'companyName',
-    'organizationName',
-    'employer',
-  ]);
-  const title = pickFieldValue(mergedSource, [
-    'title',
-    'jobTitle',
-    'position',
-    'role',
-  ]);
-  const email = pickFieldValue(mergedSource, [
-    'email',
-    'emailAddress',
-    'workEmail',
-    'contactEmail',
-  ]);
-  const phone = pickFieldValue(mergedSource, [
-    'phone',
-    'phoneNumber',
-    'mobile',
-    'cell',
-    'workPhone',
-    'officePhone',
-    'telephone',
-  ]);
-  const website = pickFieldValue(mergedSource, [
-    'website',
-    'url',
-    'web',
-    'companyWebsite',
-  ]);
-  const address = pickFieldValue(mergedSource, [
-    'address',
-    'streetAddress',
-    'mailingAddress',
-    'location',
-  ]);
+  const mapped = mapDynamicRow(mergedSource);
+  const usedKeys = new Set(mapped.usedNormalizedKeys);
 
-  const reservedNormalized = new Set([
+  const extraFields = collectExtraFields(mergedSource, usedKeys, [
     'id',
     'extrafields',
     'firstname',
     'lastname',
     'social',
     'rawtext',
-    ...(fullName.matchedKey ? [normalizeKey(fullName.matchedKey)] : []),
-    ...(company.matchedKey ? [normalizeKey(company.matchedKey)] : []),
-    ...(title.matchedKey ? [normalizeKey(title.matchedKey)] : []),
-    ...(email.matchedKey ? [normalizeKey(email.matchedKey)] : []),
-    ...(phone.matchedKey ? [normalizeKey(phone.matchedKey)] : []),
-    ...(website.matchedKey ? [normalizeKey(website.matchedKey)] : []),
-    ...(address.matchedKey ? [normalizeKey(address.matchedKey)] : []),
   ]);
-
-  const extraFields: Record<string, string> = {};
-  for (const [key, rawValue] of Object.entries(mergedSource)) {
-    if (reservedNormalized.has(normalizeKey(key))) continue;
-    const value = asCleanString(rawValue);
-    if (!value) continue;
-    extraFields[key] = value;
-  }
 
   return {
     id: String(card.id ?? crypto.randomUUID()),
-    fullName: fullName.value,
+    fullName: mapped.fullName,
     firstName: asCleanString(card.firstName),
     lastName: asCleanString(card.lastName),
-    company: company.value,
-    title: title.value,
-    phone: phone.value,
-    email: email.value,
-    website: website.value,
-    address: address.value,
+    company: mapped.organization,
+    title: mapped.jobTitle,
+    phone: mapped.phone,
+    email: mapped.email,
+    website: mapped.website,
+    address: mapped.address,
     social: asCleanString(card.social),
     extraFields,
     rawText: asCleanString(card.rawText),
