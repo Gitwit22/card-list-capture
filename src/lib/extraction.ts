@@ -96,7 +96,7 @@ export async function extractFromImage(
     logExtractionDebug('signup-sheet', result);
 
     if (Array.isArray(result.rows) && result.rows.length > 0) {
-      const entries = result.rows.map(mapSignupRow);
+      const entries = mapSignupRowsWithColumnResolution(result.rows, result.detectedHeaders ?? []);
       const meta: ExtractionMeta = {
         structure: (result.structure as ExtractionMeta['structure']) ?? 'table',
         detectedHeaders: result.detectedHeaders ?? [],
@@ -104,7 +104,11 @@ export async function extractFromImage(
         confidence: result.confidence ?? 0,
         rawRows: result.rawRows,
       };
-      return { entries, meta };
+      if (entries.length > 0) {
+        return { entries, meta };
+      }
+
+      return { entries: result.rows.map(mapSignupRow), meta };
     }
   }
 
@@ -450,6 +454,14 @@ function normalizeKey(key: string): string {
   return key.toLowerCase().replace(/[^a-z0-9]/g, '');
 }
 
+function normalizeHeader(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 function isNonEmpty(value: unknown): boolean {
   return value !== undefined && value !== null && String(value).trim() !== '';
 }
@@ -485,6 +497,349 @@ type CanonicalField =
   | 'website'
   | 'comments';
 
+type SignupCanonicalField =
+  | 'fullName'
+  | 'organization'
+  | 'phone'
+  | 'email'
+  | 'screening'
+  | 'shareInfo'
+  | 'date'
+  | 'comments';
+
+const SIGNUP_FIELD_MAP: Record<SignupCanonicalField, string[]> = {
+  fullName: ['full name', 'name', 'participant', 'contact', 'person', 'attendee'],
+  organization: ['organization', 'org', 'company', 'agency', 'business', 'employer', 'institution', 'nls'],
+  phone: ['phone', 'tel', 'telephone', 'mobile', 'cell', 'contact info', 'number'],
+  email: ['email', 'e mail', 'mail', 'email address', 'address'],
+  screening: ['screening', 'screened', 'waiver', 'checked in', 'check in'],
+  shareInfo: ['share info', 'share information', 'share contact', 'consent', 'opt in'],
+  date: ['date', 'signup date', 'sign date', 'timestamp'],
+  comments: ['comments', 'comment', 'notes', 'note', 'remarks', 'message'],
+};
+
+const ORGANIZATION_HINTS = /\b(llc|inc|corp|co|company|agency|group|foundation|ministries|ministry|church|university|college|school|hospital|center|centre|services|network|association|institute)\b/i;
+
+function isLikelyNameValue(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed || looksLikeEmail(trimmed) || looksLikePhone(trimmed)) return false;
+  if (/\d{3,}/.test(trimmed)) return false;
+  const words = trimmed.split(/\s+/).filter(Boolean);
+  if (words.length < 1 || words.length > 4) return false;
+  return /^[A-Za-z'\-.\s]+$/.test(trimmed);
+}
+
+function isLikelyOrganizationValue(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed || looksLikeEmail(trimmed) || looksLikePhone(trimmed)) return false;
+  if (ORGANIZATION_HINTS.test(trimmed)) return true;
+  const words = trimmed.split(/\s+/).filter(Boolean);
+  return words.length >= 2 && words.length <= 6;
+}
+
+function isLikelyDateValue(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed) return false;
+  if (/^\d{1,2}[/-]\d{1,2}([/-]\d{2,4})?$/.test(trimmed)) return true;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return true;
+  const parsed = Date.parse(trimmed);
+  return Number.isFinite(parsed);
+}
+
+function isLikelyYesNoValue(value: string): boolean {
+  const normalized = normalizeHeader(value);
+  return ['yes', 'no', 'y', 'n', 'true', 'false', 'checked', 'unchecked', 'x'].includes(normalized);
+}
+
+function isLikelyCommentValue(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed) return false;
+  return trimmed.length >= 18 || /[,.!?]/.test(trimmed);
+}
+
+function looksLikeAliasValue(value: string, aliases: string[]): boolean {
+  const normalized = normalizeHeader(value);
+  return aliases.some((alias) => normalized === normalizeHeader(alias));
+}
+
+function isLikelyHeaderRow(row: string[], headers: string[]): boolean {
+  if (row.length === 0 || headers.length === 0) return false;
+  const normalizedRow = row.map((v) => normalizeHeader(v));
+  const normalizedHeaders = headers.map((v) => normalizeHeader(v));
+
+  let compared = 0;
+  let matches = 0;
+
+  for (let i = 0; i < Math.min(normalizedRow.length, normalizedHeaders.length); i += 1) {
+    if (!normalizedHeaders[i]) continue;
+    compared += 1;
+    if (normalizedRow[i] && normalizedRow[i] === normalizedHeaders[i]) {
+      matches += 1;
+    }
+  }
+
+  return compared > 0 && matches === compared;
+}
+
+function isLikelyAliasOnlyRow(row: string[]): boolean {
+  const allAliases = new Set(
+    Object.values(SIGNUP_FIELD_MAP)
+      .flat()
+      .map((alias) => normalizeHeader(alias)),
+  );
+
+  const nonEmpty = row
+    .map((cell) => normalizeHeader(cell))
+    .filter(Boolean);
+
+  if (nonEmpty.length === 0) return true;
+
+  const aliasMatches = nonEmpty.filter((cell) => allAliases.has(cell)).length;
+  return aliasMatches >= 2 && aliasMatches >= Math.ceil(nonEmpty.length * 0.7);
+}
+
+function computeHeaderMatchScore(header: string, aliases: string[]): number {
+  const normalizedHeader = normalizeHeader(header);
+  if (!normalizedHeader) return 0;
+
+  let best = 0;
+  for (const alias of aliases) {
+    const normalizedAlias = normalizeHeader(alias);
+    if (!normalizedAlias) continue;
+
+    if (normalizedHeader === normalizedAlias) {
+      best = Math.max(best, 3);
+      continue;
+    }
+
+    if (
+      normalizedHeader.startsWith(`${normalizedAlias} `)
+      || normalizedHeader.endsWith(` ${normalizedAlias}`)
+      || normalizedHeader.includes(normalizedAlias)
+    ) {
+      best = Math.max(best, 1);
+    }
+  }
+
+  return best;
+}
+
+function resolveColumnIndices(headers: string[]): Partial<Record<SignupCanonicalField, number>> {
+  const resolved: Partial<Record<SignupCanonicalField, number>> = {};
+  const bestScores: Partial<Record<SignupCanonicalField, number>> = {};
+
+  headers.forEach((header, index) => {
+    (Object.keys(SIGNUP_FIELD_MAP) as SignupCanonicalField[]).forEach((field) => {
+      const score = computeHeaderMatchScore(header, SIGNUP_FIELD_MAP[field]);
+      if (score <= 0) return;
+      const currentScore = bestScores[field] ?? -1;
+      if (score > currentScore) {
+        resolved[field] = index;
+        bestScores[field] = score;
+      }
+    });
+  });
+
+  return resolved;
+}
+
+function scoreColumnByValues(values: string[], field: SignupCanonicalField): number {
+  const nonEmpty = values.map((v) => v.trim()).filter(Boolean);
+  if (nonEmpty.length === 0) return 0;
+
+  let matches = 0;
+  for (const value of nonEmpty) {
+    if (
+      (field === 'email' && looksLikeEmail(value))
+      || (field === 'phone' && looksLikePhone(value))
+      || (field === 'fullName' && isLikelyNameValue(value))
+      || (field === 'organization' && isLikelyOrganizationValue(value))
+      || (field === 'date' && isLikelyDateValue(value))
+      || ((field === 'screening' || field === 'shareInfo') && isLikelyYesNoValue(value))
+      || (field === 'comments' && isLikelyCommentValue(value))
+    ) {
+      matches += 1;
+    }
+  }
+
+  return matches / nonEmpty.length;
+}
+
+function inferColumnsFromValues(
+  rows: string[][],
+  existing: Partial<Record<SignupCanonicalField, number>>,
+): Partial<Record<SignupCanonicalField, number>> {
+  if (rows.length === 0) return existing;
+
+  const next = { ...existing };
+  const assigned = new Set<number>(Object.values(next).filter((v): v is number => v !== undefined));
+  const width = Math.max(...rows.map((row) => row.length), 0);
+
+  const thresholds: Partial<Record<SignupCanonicalField, number>> = {
+    email: 0.65,
+    phone: 0.55,
+    fullName: 0.5,
+    organization: 0.4,
+    date: 0.5,
+    screening: 0.7,
+    shareInfo: 0.7,
+    comments: 0.45,
+  };
+
+  const fieldsInPriority: SignupCanonicalField[] = [
+    'email',
+    'phone',
+    'fullName',
+    'organization',
+    'date',
+    'screening',
+    'shareInfo',
+    'comments',
+  ];
+
+  for (const field of fieldsInPriority) {
+    if (next[field] !== undefined) continue;
+
+    let bestIndex = -1;
+    let bestScore = 0;
+
+    for (let col = 0; col < width; col += 1) {
+      if (assigned.has(col)) continue;
+      const colValues = rows.map((row) => row[col] ?? '');
+      const score = scoreColumnByValues(colValues, field);
+      if (score > bestScore) {
+        bestScore = score;
+        bestIndex = col;
+      }
+    }
+
+    const threshold = thresholds[field] ?? 0.6;
+    if (bestIndex >= 0 && bestScore >= threshold) {
+      next[field] = bestIndex;
+      assigned.add(bestIndex);
+    }
+  }
+
+  return next;
+}
+
+function buildSignupTableData(
+  rows: Array<Record<string, unknown>>,
+  detectedHeaders: string[],
+): {
+  sourceKeys: string[];
+  headerLabels: string[];
+  matrix: string[][];
+} {
+  const first = rows[0] ?? {};
+  const sourceKeys = Object.keys(first).filter((key) => !['id', 'extraFields'].includes(normalizeKey(key)));
+  const headerLabels = detectedHeaders.length === sourceKeys.length
+    ? detectedHeaders
+    : sourceKeys;
+
+  const matrix = rows.map((row) => sourceKeys.map((key) => asCleanString(row[key])));
+
+  return {
+    sourceKeys,
+    headerLabels,
+    matrix,
+  };
+}
+
+function mapSignupRowsWithColumnResolution(
+  rows: Array<Record<string, unknown>>,
+  detectedHeaders: string[],
+): SignupEntry[] {
+  if (rows.length === 0) return [];
+
+  const { sourceKeys, headerLabels, matrix } = buildSignupTableData(rows, detectedHeaders);
+
+  if (sourceKeys.length === 0) {
+    return rows.map(mapSignupRow).filter((entry) => {
+      const nonEmptyCore = [entry.fullName, entry.organization, entry.email, entry.phone].filter((v) => v.trim()).length;
+      return nonEmptyCore > 0;
+    });
+  }
+
+  const nonJunkRows = matrix.filter((row) => !isLikelyHeaderRow(row, headerLabels) && !isLikelyAliasOnlyRow(row));
+  const resolvedByHeader = resolveColumnIndices(headerLabels);
+  const resolved = inferColumnsFromValues(nonJunkRows, resolvedByHeader);
+
+  const usedIndexes = new Set<number>(Object.values(resolved).filter((v): v is number => v !== undefined));
+
+  return rows
+    .map((row, rowIndex) => {
+      const cells = matrix[rowIndex] ?? [];
+      if (isLikelyHeaderRow(cells, headerLabels) || isLikelyAliasOnlyRow(cells)) {
+        return null;
+      }
+
+      const getByField = (field: SignupCanonicalField): string => {
+        const index = resolved[field];
+        if (index === undefined) return '';
+        return (cells[index] ?? '').trim();
+      };
+
+      const fullName = getByField('fullName');
+      const organization = getByField('organization');
+      const email = getByField('email');
+      const phone = getByField('phone');
+      const screening = getByField('screening');
+      const shareInfo = getByField('shareInfo');
+      const date = getByField('date');
+      const comments = getByField('comments');
+
+      const looksLikeLabelRow = (
+        (!fullName || looksLikeAliasValue(fullName, SIGNUP_FIELD_MAP.fullName))
+        && (!organization || looksLikeAliasValue(organization, SIGNUP_FIELD_MAP.organization))
+        && (!email || looksLikeAliasValue(email, SIGNUP_FIELD_MAP.email))
+        && (!phone || looksLikeAliasValue(phone, SIGNUP_FIELD_MAP.phone))
+      );
+
+      if (looksLikeLabelRow) {
+        const filledCount = [fullName, organization, email, phone, screening, shareInfo, date, comments]
+          .filter((value) => value.trim().length > 0).length;
+        if (filledCount >= 2) return null;
+      }
+
+      const rowExtra = (row.extraFields ?? {}) as Record<string, unknown>;
+      const extraFields: Record<string, string> = {};
+
+      sourceKeys.forEach((sourceKey, index) => {
+        if (usedIndexes.has(index)) return;
+        const value = (cells[index] ?? '').trim();
+        if (!value) return;
+        const label = headerLabels[index] || sourceKey;
+        extraFields[label] = value;
+      });
+
+      for (const [key, value] of Object.entries(rowExtra)) {
+        const clean = asCleanString(value);
+        if (!clean) continue;
+        if (!extraFields[key]) {
+          extraFields[key] = clean;
+        }
+      }
+
+      const hasCore = [fullName, organization, email, phone].some((value) => value.trim().length > 0);
+      if (!hasCore) return null;
+
+      return {
+        id: String(row.id ?? crypto.randomUUID()),
+        fullName,
+        organization,
+        phone,
+        email,
+        screening,
+        shareInfo,
+        date,
+        comments,
+        extraFields,
+      } satisfies SignupEntry;
+    })
+    .filter((entry): entry is SignupEntry => entry !== null);
+}
+
 type DynamicMappedRow = {
   fullName: string;
   organization: string;
@@ -497,8 +852,12 @@ type DynamicMappedRow = {
   usedNormalizedKeys: Set<string>;
 };
 
+interface DynamicMapOptions {
+  includeComments?: boolean;
+}
+
 function guessFieldFromHeader(header: string): CanonicalField | null {
-  const h = normalizeKey(header);
+  const h = normalizeHeader(header).replace(/\s+/g, '');
 
   const matchers: Array<[CanonicalField, RegExp[]]> = [
     [
@@ -566,7 +925,9 @@ function guessFieldFromHeader(header: string): CanonicalField | null {
   return null;
 }
 
-function mapDynamicRow(raw: Record<string, unknown>): DynamicMappedRow {
+function mapDynamicRow(raw: Record<string, unknown>, options: DynamicMapOptions = {}): DynamicMappedRow {
+  const includeComments = options.includeComments ?? true;
+
   const result: DynamicMappedRow = {
     fullName: '',
     organization: '',
@@ -583,6 +944,7 @@ function mapDynamicRow(raw: Record<string, unknown>): DynamicMappedRow {
     if (!isNonEmpty(value)) continue;
 
     const field = guessFieldFromHeader(key);
+    if (field === 'comments' && !includeComments) continue;
     if (field && !result[field]) {
       result[field] = asCleanString(value);
       result.usedNormalizedKeys.add(normalizeKey(key));
@@ -719,8 +1081,42 @@ function mapBusinessCard(card: Record<string, unknown>): BusinessCardEntry {
     ...card,
   };
 
-  const mapped = mapDynamicRow(mergedSource);
+  const mapped = mapDynamicRow(mergedSource, { includeComments: false });
   const usedKeys = new Set(mapped.usedNormalizedKeys);
+
+  const fallbackFullName =
+    asCleanString(card.fullName)
+    || asCleanString(card.name)
+    || asCleanString(card.contactName)
+    || asCleanString(card.person);
+  const fallbackCompany =
+    asCleanString(card.company)
+    || asCleanString(card.organization)
+    || asCleanString(card.org)
+    || asCleanString(card.companyName)
+    || asCleanString(card.business);
+  const fallbackTitle =
+    asCleanString(card.title)
+    || asCleanString(card.jobTitle)
+    || asCleanString(card.position)
+    || asCleanString(card.role);
+  const fallbackPhone =
+    asCleanString(card.phone)
+    || asCleanString(card.phoneNumber)
+    || asCleanString(card.mobile)
+    || asCleanString(card.tel);
+  const fallbackEmail =
+    asCleanString(card.email)
+    || asCleanString(card.emailAddress)
+    || asCleanString(card.mail);
+  const fallbackWebsite =
+    asCleanString(card.website)
+    || asCleanString(card.url)
+    || asCleanString(card.web);
+  const fallbackAddress =
+    asCleanString(card.address)
+    || asCleanString(card.mailingAddress)
+    || asCleanString(card.streetAddress);
 
   const extraFields = collectExtraFields(mergedSource, usedKeys, [
     'id',
@@ -733,15 +1129,15 @@ function mapBusinessCard(card: Record<string, unknown>): BusinessCardEntry {
 
   return {
     id: String(card.id ?? crypto.randomUUID()),
-    fullName: mapped.fullName,
+    fullName: mapped.fullName || fallbackFullName,
     firstName: asCleanString(card.firstName),
     lastName: asCleanString(card.lastName),
-    company: mapped.organization,
-    title: mapped.jobTitle,
-    phone: mapped.phone,
-    email: mapped.email,
-    website: mapped.website,
-    address: mapped.address,
+    company: mapped.organization || fallbackCompany,
+    title: mapped.jobTitle || fallbackTitle,
+    phone: mapped.phone || fallbackPhone,
+    email: mapped.email || fallbackEmail,
+    website: mapped.website || fallbackWebsite,
+    address: mapped.address || fallbackAddress,
     social: asCleanString(card.social),
     extraFields,
     rawText: asCleanString(card.rawText),
