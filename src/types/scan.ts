@@ -28,12 +28,21 @@ export interface BusinessCardEntry {
   sourceLabel?: string;
   sourceItemId?: string;
   sourceCardId?: string;
+  sourceImageId?: string;
+  sourceImageName?: string;
+  sourceImageUrl?: string;
+  cropIndex?: number;
+  cropImageUrl?: string;
+  scanMode?: ScanMode;
+  frontBackStatus?: 'front-only' | 'front-and-back';
   sourceType?: 'camera' | 'upload';
   hasBack?: boolean;
   frontPreviewUrl?: string;
   backPreviewUrl?: string;
   backText?: string;
   conflictFields?: string[];
+  warnings?: string[];
+  confidence?: number;
   needsReview?: boolean;
   status?: 'complete' | 'needs_review' | 'failed';
   error?: string;
@@ -42,6 +51,8 @@ export interface BusinessCardEntry {
   extraFields: Record<string, string>;
   rawText: string;
 }
+
+export type ScanMode = 'single-card' | 'multi-card';
 
 export interface HeaderMapping {
   original: string;
@@ -80,6 +91,13 @@ export interface BatchCardItem {
   id: string;
   front: CardImageSide;
   back?: CardImageSide;
+  sourceImageId?: string;
+  sourceImageName?: string;
+  sourceImageUrl?: string;
+  cropIndex?: number;
+  scanMode?: ScanMode;
+  confidence?: number;
+  warnings?: string[];
   status: BatchItemStatus;
   error?: string;
   extractedRows: BusinessCardEntry[];

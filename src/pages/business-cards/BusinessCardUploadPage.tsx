@@ -5,7 +5,7 @@ export default function BusinessCardUploadPage() {
     <BusinessCardWorkflow
       mode="multi-upload"
       title="Upload Multiple Photos"
-      subtitle="Upload photos, pair front/back in queue, process, review, and export one row per card."
+      subtitle="Upload photos in single-card mode or detect multiple cards per photo, then review everything in one export session."
     />
   );
 }

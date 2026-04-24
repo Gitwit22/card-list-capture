@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { AlertCircle, ArrowLeft, CheckCircle2, RotateCw, ShieldCheck, Trash2 } from 'lucide-react';
+import { AlertCircle, ArrowLeft, CheckCircle2, RotateCw, ShieldCheck, Trash2, AlertTriangle } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -27,6 +27,7 @@ import {
   BatchProgressSnapshot,
   BusinessCardEntry,
   CardImageSide,
+  ScanMode,
 } from '@/types/scan';
 import {
   createEmptyBusinessCard,
@@ -39,6 +40,7 @@ import {
   getBusinessCardExportColumnGroups,
   type ExportFormat,
 } from '@/lib/export';
+import { detectBusinessCardCrops, type DetectionDebugInfo } from '@/lib/multiCardDetection';
 import { toast } from 'sonner';
 
 type Step = 'capture' | 'batch-queue' | 'processing' | 'batch-processing' | 'review';
@@ -57,6 +59,29 @@ interface BusinessCardWorkflowProps {
   mode: BusinessCardCaptureMode;
   title: string;
   subtitle: string;
+}
+
+interface CardBatch {
+  id: string;
+  sourceImageName: string;
+  sourceImageUrl?: string;
+  scanMode: ScanMode;
+  detectedCount: number;
+  createdAt: string;
+}
+
+interface WorkflowDetectedCardCrop {
+  id: string;
+  sourceImageId: string;
+  sourceImageName: string;
+  sourceImageUrl?: string;
+  cropIndex: number;
+  cropImageUrl: string;
+  confidence: number;
+  aspectRatio: number;
+  areaPercent: number;
+  warnings: string[];
+  queueItemId: string;
 }
 
 function makeCardImageSide(capture: QueuedCapture): CardImageSide {
@@ -81,8 +106,16 @@ function inferPairKey(filename?: string): string | null {
 export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWorkflowProps) {
   const navigate = useNavigate();
   const [step, setStep] = useState<Step>('capture');
+  const [scanMode, setScanMode] = useState<ScanMode>('single-card');
   const [data, setData] = useState<BusinessCardEntry[]>([]);
   const [batchQueue, setBatchQueue] = useState<BatchCardItem[]>([]);
+  const [batchSessionRows, setBatchSessionRows] = useState<BusinessCardEntry[]>([]);
+  const [detectedCardCrops, setDetectedCardCrops] = useState<WorkflowDetectedCardCrop[]>([]);
+  const [detectionDebugBySource, setDetectionDebugBySource] = useState<Record<string, DetectionDebugInfo>>({});
+  const sourceCaptureRef = useRef<Map<string, QueuedCapture>>(new Map());
+  const [showDeveloperDebugOverlay, setShowDeveloperDebugOverlay] = useState(Boolean(import.meta.env.DEV));
+  const [cardBatches, setCardBatches] = useState<CardBatch[]>([]);
+  const [isDetecting, setIsDetecting] = useState(false);
   const [batchProgress, setBatchProgress] = useState<BatchProgressSnapshot>(emptySnapshot);
   const [isBatchProcessing, setIsBatchProcessing] = useState(false);
   const [singleCardDraft, setSingleCardDraft] = useState<BatchCardItem | null>(null);
@@ -143,6 +176,10 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
 
   const singleBackInputRef = useRef<HTMLInputElement | null>(null);
 
+  useEffect(() => {
+    setBatchSessionRows(data);
+  }, [data]);
+
   // ── Session init: check for recoverable session on mount ─────────────────
   useEffect(() => {
     const settings = getSessionSettings();
@@ -198,6 +235,13 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
                 id: item.id,
                 front: await serializeSide(item.front, 'front'),
                 back: item.back ? await serializeSide(item.back, 'back') : undefined,
+                sourceImageId: item.sourceImageId,
+                sourceImageName: item.sourceImageName,
+                sourceImageUrl: item.sourceImageUrl,
+                cropIndex: item.cropIndex,
+                scanMode: item.scanMode,
+                confidence: item.confidence,
+                warnings: item.warnings,
                 status: item.status,
                 error: item.error,
                 extractedRows: item.extractedRows,
@@ -210,6 +254,7 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
           const draft: LocalDraftSession = {
             id: sessionIdRef.current,
             mode,
+            scanMode,
             step,
             batchQueue: serializedQueue,
             data,
@@ -229,7 +274,7 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
       if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionInitialized, step, batchQueue, data, rapidPendingCardId, isBatchProcessing]);
+  }, [sessionInitialized, step, batchQueue, data, rapidPendingCardId, isBatchProcessing, mode, scanMode]);
 
   // ── Resume handler ────────────────────────────────────────────────────────
   const handleResumeSession = useCallback(async () => {
@@ -261,6 +306,13 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
           id: item.id,
           front: await rebuildSide(item.front),
           back: item.back ? await rebuildSide(item.back) : undefined,
+          sourceImageId: item.sourceImageId,
+          sourceImageName: item.sourceImageName,
+          sourceImageUrl: item.sourceImageUrl,
+          cropIndex: item.cropIndex,
+          scanMode: item.scanMode,
+          confidence: item.confidence,
+          warnings: item.warnings,
           status: item.status,
           error: item.error,
           extractedRows: item.extractedRows,
@@ -280,7 +332,41 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
     sessionCreatedAtRef.current = session.createdAt;
 
     setBatchQueue(rebuiltQueue);
+    setScanMode(session.scanMode ?? 'single-card');
     setData(session.data);
+    setBatchSessionRows(session.data);
+    setDetectedCardCrops(
+      rebuiltQueue
+        .filter((item) => item.scanMode === 'multi-card')
+        .map((item) => ({
+          id: crypto.randomUUID(),
+          sourceImageId: item.sourceImageId ?? item.id,
+          sourceImageName: item.sourceImageName ?? item.front.filename ?? 'photo',
+          sourceImageUrl: item.sourceImageUrl,
+          cropIndex: item.cropIndex ?? 1,
+          cropImageUrl: item.front.previewUrl,
+          confidence: item.confidence ?? 0,
+          aspectRatio: 0,
+          areaPercent: 0,
+          warnings: item.warnings ?? [],
+          queueItemId: item.id,
+        })),
+    );
+    setCardBatches(Array.from(new Map(
+      rebuiltQueue
+        .filter((item) => item.sourceImageId)
+        .map((item) => [
+          item.sourceImageId as string,
+          {
+            id: item.sourceImageId as string,
+            sourceImageName: item.sourceImageName ?? item.front.filename ?? 'photo',
+            sourceImageUrl: item.sourceImageUrl,
+            scanMode: item.scanMode ?? 'single-card',
+            detectedCount: rebuiltQueue.filter((candidate) => candidate.sourceImageId === item.sourceImageId).length,
+            createdAt: session.createdAt,
+          } satisfies CardBatch,
+        ]),
+    ).values()));
     setRapidPendingCardId(session.rapidPendingCardId);
     // Restore to batch-queue step so the user can review before re-processing.
     const restoredStep: Step =
@@ -298,6 +384,11 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
     persistedImageKeysRef.current.clear();
     sessionIdRef.current = crypto.randomUUID();
     sessionCreatedAtRef.current = new Date().toISOString();
+    setCardBatches([]);
+    setDetectedCardCrops([]);
+    setDetectionDebugBySource({});
+    sourceCaptureRef.current.clear();
+    setBatchSessionRows([]);
   }, []);
 
   // ── Clear session action ──────────────────────────────────────────────────
@@ -306,6 +397,11 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
     persistedImageKeysRef.current.clear();
     sessionIdRef.current = crypto.randomUUID();
     sessionCreatedAtRef.current = new Date().toISOString();
+    setCardBatches([]);
+    setDetectedCardCrops([]);
+    setDetectionDebugBySource({});
+    sourceCaptureRef.current.clear();
+    setBatchSessionRows([]);
     toast.success('Session cleared.');
   }, []);
 
@@ -340,6 +436,14 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
           sourceLabel: item.front.filename || `Card ${item.index + 1}`,
           sourceItemId: item.id,
           sourceCardId: item.id,
+          sourceImageId: item.sourceImageId,
+          sourceImageName: item.sourceImageName,
+          sourceImageUrl: item.sourceImageUrl,
+          cropIndex: item.cropIndex,
+          cropImageUrl: item.front.previewUrl,
+          scanMode: item.scanMode ?? 'single-card',
+          confidence: item.confidence,
+          warnings: item.warnings,
           sourceType: item.front.sourceType,
           hasBack: Boolean(item.back),
           frontPreviewUrl: item.front.previewUrl,
@@ -353,6 +457,163 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
 
     return rows;
   }, []);
+
+  const queueMultiCardCapture = useCallback(async (capture: QueuedCapture, sourceImageIdOverride?: string) => {
+    const sourceImageId = sourceImageIdOverride ?? crypto.randomUUID();
+    setIsDetecting(true);
+    sourceCaptureRef.current.set(sourceImageId, capture);
+
+    try {
+      const detection = await detectBusinessCardCrops(capture.file, {
+        maxCards: 6,
+        hardMaxCards: 12,
+        debug: Boolean(import.meta.env.DEV),
+        enableDebugOverlay: showDeveloperDebugOverlay,
+      });
+      const detectionWarnings = [...detection.warnings];
+
+      setDetectionDebugBySource((current) => ({
+        ...current,
+        [sourceImageId]: detection.debug,
+      }));
+
+      const nextBatch: CardBatch = {
+        id: sourceImageId,
+        sourceImageName: capture.file.name,
+        sourceImageUrl: capture.previewUrl,
+        scanMode: 'multi-card',
+        detectedCount: Math.max(1, detection.debug.detectedCardCount),
+        createdAt: new Date().toISOString(),
+      };
+
+      setCardBatches((current) => {
+        const withoutExisting = current.filter((batch) => batch.id !== sourceImageId);
+        return [...withoutExisting, nextBatch];
+      });
+
+      setBatchQueue((current) => current
+        .filter((item) => item.sourceImageId !== sourceImageId)
+        .map((item, index) => ({ ...item, index })));
+      setDetectedCardCrops((current) => current.filter((crop) => crop.sourceImageId !== sourceImageId));
+
+      if (detectionWarnings.length > 0) {
+        detectionWarnings.forEach((warning) => toast.warning(warning));
+      }
+
+      if (detection.crops.length === 0) {
+        const fallbackCardId = crypto.randomUUID();
+        setBatchQueue((current) => [
+          ...current,
+          {
+            id: fallbackCardId,
+            front: makeCardImageSide(capture),
+            sourceImageId,
+            sourceImageName: capture.file.name,
+            sourceImageUrl: capture.previewUrl,
+            cropIndex: 1,
+            scanMode: 'multi-card',
+            warnings: ['Detection fallback: processed full image as a single card.'],
+            confidence: 0.35,
+            status: 'queued',
+            error: undefined,
+            extractedRows: [],
+            needsReview: true,
+            index: current.length,
+          },
+        ].map((item, index) => ({ ...item, index })));
+        return;
+      }
+
+      const queueItems: BatchCardItem[] = detection.crops.map((crop) => ({
+        id: crypto.randomUUID(),
+        front: {
+          file: crop.file,
+          previewUrl: crop.previewUrl,
+          filename: crop.file.name,
+          sourceType: capture.sourceType,
+        },
+        sourceImageId,
+        sourceImageName: capture.file.name,
+        sourceImageUrl: capture.previewUrl,
+        cropIndex: crop.cropIndex,
+        scanMode: 'multi-card',
+        warnings: [...detectionWarnings, ...crop.warnings],
+        confidence: crop.confidence,
+        status: 'queued',
+        error: undefined,
+        extractedRows: [],
+        needsReview: crop.warnings.length > 0,
+        index: 0,
+      }));
+
+      setBatchQueue((current) => [...current, ...queueItems].map((item, index) => ({ ...item, index })));
+      setDetectedCardCrops((current) => [
+        ...current,
+        ...detection.crops.map((crop, index) => ({
+          id: crop.id,
+          sourceImageId,
+          sourceImageName: capture.file.name,
+          sourceImageUrl: capture.previewUrl,
+          cropIndex: crop.cropIndex,
+          cropImageUrl: crop.previewUrl,
+          confidence: crop.confidence,
+          aspectRatio: crop.aspectRatio,
+          areaPercent: crop.areaPercent,
+          warnings: [...detectionWarnings, ...crop.warnings],
+          queueItemId: queueItems[index].id,
+        })),
+      ]);
+    } catch {
+      toast.error(`Unable to detect cards in ${capture.file.name}. Falling back to single-card extraction.`);
+      const fallbackCardId = crypto.randomUUID();
+      setBatchQueue((current) => [
+        ...current,
+        {
+          id: fallbackCardId,
+          front: makeCardImageSide(capture),
+          sourceImageId,
+          sourceImageName: capture.file.name,
+          sourceImageUrl: capture.previewUrl,
+          cropIndex: 1,
+          scanMode: 'multi-card',
+          warnings: ['Detection failed: processed full image as a single card.'],
+          confidence: 0.3,
+          status: 'queued',
+          error: undefined,
+          extractedRows: [],
+          needsReview: true,
+          index: current.length,
+        },
+      ].map((item, index) => ({ ...item, index })));
+      setCardBatches((current) => {
+        const withoutExisting = current.filter((batch) => batch.id !== sourceImageId);
+        return [
+          ...withoutExisting,
+          {
+            id: sourceImageId,
+            sourceImageName: capture.file.name,
+            sourceImageUrl: capture.previewUrl,
+            scanMode: 'multi-card',
+            detectedCount: 1,
+            createdAt: new Date().toISOString(),
+          },
+        ];
+      });
+    } finally {
+      setIsDetecting(false);
+    }
+  }, [showDeveloperDebugOverlay]);
+
+  const rerunDetectionForSource = useCallback(async (sourceImageId: string) => {
+    const capture = sourceCaptureRef.current.get(sourceImageId);
+    if (!capture) {
+      toast.error('Original image file is not available for re-run in this session.');
+      return;
+    }
+
+    toast.info(`Re-running detection for ${capture.file.name}...`);
+    await queueMultiCardCapture(capture, sourceImageId);
+  }, [queueMultiCardCapture]);
 
   const addCapturesToQueue = useCallback((captures: QueuedCapture[]) => {
     if (captures.length === 0) return;
@@ -397,10 +658,36 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
     }
 
     if (mode === 'multi-upload') {
+      if (scanMode === 'multi-card') {
+        void (async () => {
+          for (const capture of captures) {
+            // Process each photo in order so crop indices remain stable for review and export.
+            // eslint-disable-next-line no-await-in-loop
+            await queueMultiCardCapture(capture);
+          }
+          toast.success(`Detection complete for ${captures.length} photo${captures.length === 1 ? '' : 's'}.`);
+        })();
+        return;
+      }
+
+      const createdBatches = captures.map((capture) => ({
+        id: crypto.randomUUID(),
+        sourceImageName: capture.file.name,
+        sourceImageUrl: capture.previewUrl,
+        scanMode: 'single-card' as const,
+        detectedCount: 1,
+        createdAt: new Date().toISOString(),
+      }));
+
+      setCardBatches((current) => ([
+        ...current,
+        ...createdBatches,
+      ]));
+
       setBatchQueue((current) => {
         const next = [...current];
 
-        captures.forEach((capture) => {
+        captures.forEach((capture, captureIndex) => {
           const side = makeCardImageSide(capture);
           const key = inferPairKey(capture.file.name);
           const isLikelyBack = /(?:^|[_\-\s])(back|sideb|b)(?:[_\-\s]|$)/i.test(capture.file.name);
@@ -416,6 +703,11 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
           next.push({
             id: crypto.randomUUID(),
             front: side,
+            sourceImageId: createdBatches[captureIndex].id,
+            sourceImageName: capture.file.name,
+            sourceImageUrl: capture.previewUrl,
+            cropIndex: 1,
+            scanMode: 'single-card',
             status: 'queued',
             error: undefined,
             extractedRows: [],
@@ -435,6 +727,10 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
     const card: BatchCardItem = {
       id: crypto.randomUUID(),
       front: makeCardImageSide(capture),
+      sourceImageName: capture.file.name,
+      sourceImageUrl: capture.previewUrl,
+      cropIndex: 1,
+      scanMode: 'single-card',
       status: 'queued',
       error: undefined,
       extractedRows: [],
@@ -443,7 +739,7 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
     };
     setSingleCardDraft(card);
     toast.info('Front captured. Does this card have a back?');
-  }, [mode, rapidPendingCardId]);
+  }, [mode, rapidPendingCardId, scanMode, queueMultiCardCapture]);
 
   const skipRapidBack = useCallback(() => {
     if (!rapidPendingCardId) return;
@@ -459,10 +755,30 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
         revokeSidePreview(target.back);
       }
 
-      return current
+      const nextQueue = current
         .filter((item) => item.id !== id)
         .map((item, index) => ({ ...item, index }));
+
+      const sourceIds = new Set(
+        nextQueue
+          .map((item) => item.sourceImageId)
+          .filter((value): value is string => Boolean(value)),
+      );
+      setCardBatches((batches) => batches.filter((batch) => sourceIds.has(batch.id)));
+      setDetectionDebugBySource((current) => Object.fromEntries(
+        Object.entries(current).filter(([sourceId]) => sourceIds.has(sourceId)),
+      ));
+
+      Array.from(sourceCaptureRef.current.keys()).forEach((sourceId) => {
+        if (!sourceIds.has(sourceId)) {
+          sourceCaptureRef.current.delete(sourceId);
+        }
+      });
+
+      return nextQueue;
     });
+
+    setDetectedCardCrops((current) => current.filter((crop) => crop.queueItemId !== id));
 
     if (rapidPendingCardId === id) {
       setRapidPendingCardId(null);
@@ -501,9 +817,14 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
       revokeQueuePreviewUrls(current);
       return [];
     });
+    setDetectedCardCrops([]);
+    setDetectionDebugBySource({});
+    sourceCaptureRef.current.clear();
+    setCardBatches([]);
     setRapidPendingCardId(null);
     setBatchProgress(emptySnapshot);
     setData([]);
+    setBatchSessionRows([]);
     setBusinessCardFilter('all');
   }, [revokeQueuePreviewUrls]);
 
@@ -517,12 +838,23 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
         sourceCardId: draft.id,
         sourceItemId: draft.id,
         sourceLabel: draft.front.filename || 'Card 1',
+        sourceImageName: draft.sourceImageName || draft.front.filename,
+        sourceImageId: draft.sourceImageId,
+        sourceImageUrl: draft.sourceImageUrl,
+        cropIndex: draft.cropIndex ?? 1,
+        cropImageUrl: draft.front.previewUrl,
+        scanMode: draft.scanMode ?? 'single-card',
         sourceType: draft.front.sourceType,
         hasBack: Boolean(draft.back),
+        frontBackStatus: draft.back ? 'front-and-back' : 'front-only',
+        confidence: merged.confidence ?? draft.confidence,
+        warnings: [...(draft.warnings ?? []), ...(merged.warnings ?? [])],
         frontPreviewUrl: draft.front.previewUrl,
         backPreviewUrl: draft.back?.previewUrl,
-        status: merged.conflictFields?.length ? 'needs_review' : 'complete',
-        needsReview: Boolean(merged.conflictFields?.length),
+        status: (merged.needsReview || (merged.warnings?.length ?? 0) > 0 || merged.conflictFields?.length)
+          ? 'needs_review'
+          : 'complete',
+        needsReview: Boolean(merged.needsReview || (merged.warnings?.length ?? 0) > 0 || merged.conflictFields?.length),
       };
 
       setData([row]);
@@ -578,6 +910,7 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
 
       const rows = buildReviewRowsFromQueue(nextItems);
       setData(rows);
+      setBatchSessionRows(rows);
       setBusinessCardFilter(rows.some((row) => row.status === 'failed' || row.status === 'needs_review') ? 'needs_review' : 'all');
       setStep('review');
 
@@ -672,10 +1005,12 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
       persistedImageKeysRef.current.clear();
       sessionIdRef.current = crypto.randomUUID();
       sessionCreatedAtRef.current = new Date().toISOString();
+      clearBatchQueue();
+      setStep('capture');
+      return;
     }
 
-    setStep('capture');
-    setData([]);
+    toast.info('Export complete. You can continue uploading and keep building this session.');
   };
 
   const queueCounts = useMemo(() => ({
@@ -686,6 +1021,36 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
     needsReview: batchQueue.filter((item) => item.status === 'needs_review').length,
   }), [batchQueue]);
 
+  const sessionCounts = useMemo(() => {
+    const ready = batchSessionRows.filter((row) => row.status !== 'failed').length;
+    const needsReview = batchSessionRows.filter((row) => row.status === 'needs_review' || row.needsReview).length;
+    const failed = batchSessionRows.filter((row) => row.status === 'failed').length;
+
+    return {
+      ready,
+      photos: cardBatches.length,
+      detectedCards: detectedCardCrops.length || batchQueue.length,
+      needsReview,
+      failed,
+    };
+  }, [batchSessionRows, cardBatches.length, detectedCardCrops.length, batchQueue.length]);
+
+  const detectedBySource = useMemo(() => {
+    const grouped: Record<string, WorkflowDetectedCardCrop[]> = {};
+    detectedCardCrops.forEach((crop) => {
+      if (!grouped[crop.sourceImageId]) {
+        grouped[crop.sourceImageId] = [];
+      }
+      grouped[crop.sourceImageId].push(crop);
+    });
+
+    Object.values(grouped).forEach((crops) => {
+      crops.sort((a, b) => a.cropIndex - b.cropIndex);
+    });
+
+    return grouped;
+  }, [detectedCardCrops]);
+
   const batchProgressPercent = batchProgress.total === 0
     ? 0
     : Math.round(((batchProgress.done + batchProgress.failed + batchProgress.needsReview) / batchProgress.total) * 100);
@@ -693,12 +1058,14 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
   const activeBatchCount = batchQueue.length;
 
   const cardPreviewMap = useMemo(() => {
-    const map: Record<string, { front?: string; back?: string }> = {};
+    const map: Record<string, { front?: string; back?: string; original?: string; sourceImageName?: string }> = {};
 
     batchQueue.forEach((item) => {
       map[item.id] = {
         front: item.front.previewUrl,
         back: item.back?.previewUrl,
+        original: item.sourceImageUrl,
+        sourceImageName: item.sourceImageName,
       };
     });
 
@@ -706,6 +1073,8 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
       map[singleCardDraft.id] = {
         front: singleCardDraft.front.previewUrl,
         back: singleCardDraft.back?.previewUrl,
+        original: singleCardDraft.sourceImageUrl,
+        sourceImageName: singleCardDraft.sourceImageName,
       };
     }
 
@@ -779,6 +1148,63 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
 
         {step === 'capture' && (
           <>
+            {mode === 'multi-upload' && (
+              <div className="rounded-lg border border-border bg-card p-4 space-y-3">
+                <p className="text-sm font-medium text-foreground">Choose scan mode</p>
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant={scanMode === 'single-card' ? 'default' : 'outline'}
+                    onClick={() => setScanMode('single-card')}
+                    disabled={isDetecting}
+                  >
+                    Scan as single card
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant={scanMode === 'multi-card' ? 'default' : 'outline'}
+                    onClick={() => setScanMode('multi-card')}
+                    disabled={isDetecting}
+                  >
+                    Detect multiple cards in photo
+                  </Button>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  For best results, upload photos with up to 6 business cards per image. Place cards on a flat contrasting background with space between each card.
+                </p>
+                {scanMode === 'multi-card' && (
+                  <div className="rounded-md border border-amber-300/60 bg-amber-50 px-3 py-2 text-xs text-amber-900 flex items-start gap-2">
+                    <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+                    <span>
+                      We recommend no more than 6 cards per photo. If detection misses cards, try taking closer photos with fewer cards.
+                    </span>
+                  </div>
+                )}
+                {import.meta.env.DEV && scanMode === 'multi-card' && (
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      type="button"
+                      variant={showDeveloperDebugOverlay ? 'default' : 'outline'}
+                      size="sm"
+                      onClick={() => setShowDeveloperDebugOverlay((current) => !current)}
+                    >
+                      {showDeveloperDebugOverlay ? 'Debug Overlay: On' : 'Debug Overlay: Off'}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => toast.info('Manual crop hook placeholder is ready. Full manual crop UI can be added next.')}
+                    >
+                      Add Manual Crop (placeholder)
+                    </Button>
+                  </div>
+                )}
+              </div>
+            )}
+
             <ImageCapture
               onImageSelected={handleImageSelected}
               mode={mode}
@@ -803,6 +1229,12 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
                 toast.info('Removed last card.');
               }}
             />
+
+            {isDetecting && mode === 'multi-upload' && scanMode === 'multi-card' && (
+              <div className="rounded-lg border border-border bg-card p-3">
+                <p className="text-sm text-muted-foreground">Detecting card regions and preparing crops...</p>
+              </div>
+            )}
 
             {mode === 'single' && singleCardDraft && (
               <div className="rounded-lg border border-border bg-card p-4 space-y-3">
@@ -844,6 +1276,92 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
 
         {step === 'batch-queue' && (
           <div className="space-y-4">
+            {mode === 'multi-upload' && detectedCardCrops.length > 0 && (
+              <div className="rounded-lg border border-border bg-card p-3 space-y-3" data-testid="detection-preview">
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-sm font-medium text-foreground">Detection preview</p>
+                  <p className="text-xs text-muted-foreground">Detected {detectedCardCrops.length} cards</p>
+                </div>
+
+                {cardBatches
+                  .filter((batch) => batch.scanMode === 'multi-card')
+                  .map((batch) => {
+                    const crops = detectedBySource[batch.id] ?? [];
+                    const debug = detectionDebugBySource[batch.id];
+
+                    return (
+                      <div key={batch.id} className="rounded-md border border-border p-3 space-y-3">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div>
+                            <p className="text-sm font-medium text-foreground truncate max-w-[340px]">{batch.sourceImageName}</p>
+                            <p className="text-xs text-muted-foreground">
+                              {debug ? `${debug.imageWidth}x${debug.imageHeight}` : 'Image size unavailable'}
+                              {' | '}Detected: {crops.length}
+                              {' | '}Rejected: {debug?.rejectedCandidateCount ?? 0}
+                            </p>
+                          </div>
+                          <div className="flex flex-wrap gap-2">
+                            <Button type="button" size="sm" variant="outline" onClick={() => rerunDetectionForSource(batch.id)} disabled={isDetecting}>
+                              Re-run detection
+                            </Button>
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              onClick={() => toast.info('Manual crop hook placeholder: add/adjust missing crops here in a future iteration.')}
+                            >
+                              Add manual crop
+                            </Button>
+                            {batch.sourceImageUrl && (
+                              <Button type="button" size="sm" variant="outline" asChild>
+                                <a href={batch.sourceImageUrl} target="_blank" rel="noreferrer">View original</a>
+                              </Button>
+                            )}
+                            {debug?.overlayUrl && import.meta.env.DEV && (
+                              <Button type="button" size="sm" variant="outline" asChild>
+                                <a href={debug.overlayUrl} target="_blank" rel="noreferrer">View debug overlay</a>
+                              </Button>
+                            )}
+                          </div>
+                        </div>
+
+                        {debug && Object.keys(debug.rejectionReasons).length > 0 && (
+                          <p className="text-[11px] text-muted-foreground">
+                            Rejections: {Object.entries(debug.rejectionReasons).map(([reason, count]) => `${reason} (${count})`).join(', ')}
+                          </p>
+                        )}
+
+                        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                          {crops.map((crop) => (
+                            <div key={crop.id} className="rounded-md border border-border p-2 space-y-2">
+                              <img
+                                src={crop.cropImageUrl}
+                                alt={`${crop.sourceImageName} crop ${crop.cropIndex}`}
+                                className="w-full h-20 rounded object-cover border border-border"
+                              />
+                              <p className="text-[11px] text-muted-foreground">
+                                Crop {crop.cropIndex} | {Math.round(crop.confidence * 100)}%
+                              </p>
+                              <p className="text-[11px] text-muted-foreground">
+                                x:{crop.aspectRatio.toFixed(2)} | area:{crop.areaPercent.toFixed(2)}%
+                              </p>
+                              <div className="flex flex-wrap gap-1">
+                                <Button type="button" size="sm" variant="outline" asChild>
+                                  <a href={crop.cropImageUrl} target="_blank" rel="noreferrer">View</a>
+                                </Button>
+                                <Button type="button" size="sm" variant="outline" onClick={() => removeBatchItem(crop.queueItemId)}>
+                                  Remove
+                                </Button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })}
+              </div>
+            )}
+
             <div className="flex flex-wrap gap-2">
               <Button type="button" variant="outline" size="sm" onClick={() => setStep('capture')}>
                 Add More
@@ -884,9 +1402,15 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
                       <div className="flex-1 min-w-0">
                         <p className="text-sm font-medium text-foreground truncate">{item.front.filename || `Card ${index + 1}`}</p>
                         <p className="text-xs text-muted-foreground">Card #{index + 1}</p>
+                        {item.sourceImageName && (
+                          <p className="text-xs text-muted-foreground truncate">
+                            Source image: {item.sourceImageName}{item.cropIndex ? ` | Crop ${item.cropIndex}` : ''}
+                          </p>
+                        )}
                         <div className="flex items-center gap-2 mt-2">
                           <Badge variant="outline">Front attached</Badge>
                           <Badge variant={item.back ? 'default' : 'secondary'}>{item.back ? 'Back attached' : 'No back'}</Badge>
+                          {item.scanMode === 'multi-card' && <Badge variant="secondary">Multi-card</Badge>}
                         </div>
                         <Badge
                           variant={
@@ -902,6 +1426,9 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
                         >
                           {item.status.replace('_', ' ')}
                         </Badge>
+                        {(item.warnings?.length ?? 0) > 0 && (
+                          <p className="text-xs text-amber-600 mt-1">{item.warnings?.[0]}</p>
+                        )}
                         {item.error && <p className="text-xs text-destructive mt-1">{item.error}</p>}
                       </div>
                       <Button
@@ -928,6 +1455,16 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
                     )}
 
                     <div className="flex flex-wrap gap-2">
+                      {item.front.previewUrl && (
+                        <Button type="button" size="sm" variant="outline" asChild>
+                          <a href={item.front.previewUrl} target="_blank" rel="noreferrer">View Crop</a>
+                        </Button>
+                      )}
+                      {item.sourceImageUrl && (
+                        <Button type="button" size="sm" variant="outline" asChild>
+                          <a href={item.sourceImageUrl} target="_blank" rel="noreferrer">View Original Photo</a>
+                        </Button>
+                      )}
                       <Button type="button" size="sm" variant="outline" asChild>
                         <label className="cursor-pointer">
                           Replace Front
@@ -1021,6 +1558,13 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
 
         {step === 'review' && (
           <div className="space-y-6">
+            <div className="rounded-lg border border-border bg-card p-3">
+              <p className="text-sm text-foreground font-medium">Ready to export: {sessionCounts.ready} rows</p>
+              <p className="text-xs text-muted-foreground mt-1">
+                Total uploaded photos: {sessionCounts.photos} | Detected cards: {sessionCounts.detectedCards} | Needs review: {sessionCounts.needsReview} | Failed: {sessionCounts.failed}
+              </p>
+            </div>
+
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               <div className="rounded-lg border border-border p-3 bg-card">
                 <p className="text-xs text-muted-foreground">Complete</p>
@@ -1111,7 +1655,7 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
                 showAdvancedColumns={showAdvancedExportColumns}
                 onToggleAdvancedColumns={setShowAdvancedExportColumns}
                 onExport={() => handleExport()}
-                readyCount={data.filter((row) => row.status !== 'failed').length}
+                readyCount={sessionCounts.ready}
                 exportDisabled={selectedExportColumns.length === 0 || selectedExportFormats.length === 0}
               />
             </div>

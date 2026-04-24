@@ -30,6 +30,13 @@ export interface SerializedBatchItem {
   id: string;
   front: SerializedCardSide;
   back?: SerializedCardSide;
+  sourceImageId?: string;
+  sourceImageName?: string;
+  sourceImageUrl?: string;
+  cropIndex?: number;
+  scanMode?: 'single-card' | 'multi-card';
+  confidence?: number;
+  warnings?: string[];
   status: BatchItemStatus;
   error?: string;
   extractedRows: BusinessCardEntry[];
@@ -40,6 +47,7 @@ export interface SerializedBatchItem {
 export interface LocalDraftSession {
   id: string;
   mode: BusinessCardCaptureMode;
+  scanMode?: 'single-card' | 'multi-card';
   step: SessionStep;
   batchQueue: SerializedBatchItem[];
   data: BusinessCardEntry[];

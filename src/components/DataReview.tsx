@@ -19,7 +19,7 @@ interface DataReviewProps {
   onBusinessCardFilterChange?: (filter: BusinessCardFilter) => void;
   onReviewProblemRows?: () => void;
   onRetryFailed?: () => void;
-  cardPreviewMap?: Record<string, { front?: string; back?: string }>;
+  cardPreviewMap?: Record<string, { front?: string; back?: string; original?: string; sourceImageName?: string }>;
 }
 
 export function DataReview({
@@ -220,6 +220,12 @@ export function DataReview({
                       {(entry as BusinessCardEntry).sourceLabel && (
                         <Badge variant="outline">{(entry as BusinessCardEntry).sourceLabel}</Badge>
                       )}
+                      {(entry as BusinessCardEntry).sourceImageName && (
+                        <Badge variant="outline">{(entry as BusinessCardEntry).sourceImageName}</Badge>
+                      )}
+                      {typeof (entry as BusinessCardEntry).cropIndex === 'number' && (
+                        <Badge variant="outline">Crop {(entry as BusinessCardEntry).cropIndex}</Badge>
+                      )}
                       <Badge variant={(entry as BusinessCardEntry).hasBack ? 'default' : 'secondary'}>
                         {(entry as BusinessCardEntry).hasBack ? 'Front + Back' : 'Front Only'}
                       </Badge>
@@ -245,7 +251,7 @@ export function DataReview({
                 const sourceCardId = cardEntry.sourceCardId || cardEntry.sourceItemId;
                 const previews = sourceCardId ? cardPreviewMap?.[sourceCardId] : undefined;
 
-                if (!previews?.front && !previews?.back && !cardEntry.backText && !cardEntry.conflictFields?.length) {
+                if (!previews?.front && !previews?.back && !previews?.original && !cardEntry.backText && !cardEntry.conflictFields?.length && !(cardEntry.warnings?.length)) {
                   return null;
                 }
 
@@ -255,7 +261,12 @@ export function DataReview({
                       <div className="flex flex-wrap gap-2">
                         {previews?.front && (
                           <Button type="button" size="sm" variant="outline" asChild>
-                            <a href={previews.front} target="_blank" rel="noreferrer">View Front</a>
+                            <a href={previews.front} target="_blank" rel="noreferrer">View Crop</a>
+                          </Button>
+                        )}
+                        {previews?.original && (
+                          <Button type="button" size="sm" variant="outline" asChild>
+                            <a href={previews.original} target="_blank" rel="noreferrer">View Original Photo</a>
                           </Button>
                         )}
                         {previews?.back && (
@@ -265,9 +276,17 @@ export function DataReview({
                         )}
                       </div>
                     )}
+                    {typeof cardEntry.confidence === 'number' && (
+                      <p className="text-xs text-muted-foreground">Confidence: {Math.round(cardEntry.confidence * 100)}%</p>
+                    )}
                     {cardEntry.conflictFields && cardEntry.conflictFields.length > 0 && (
                       <p className="text-xs text-amber-600">
                         Conflict fields: {cardEntry.conflictFields.join(', ')}
+                      </p>
+                    )}
+                    {cardEntry.warnings && cardEntry.warnings.length > 0 && (
+                      <p className="text-xs text-amber-600">
+                        Warnings: {cardEntry.warnings.join(' | ')}
                       </p>
                     )}
                     {cardEntry.backText && (

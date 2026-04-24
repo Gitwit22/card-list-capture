@@ -276,6 +276,11 @@ export interface BatchExtractionResult {
 
 const DEFAULT_BATCH_CONCURRENCY = 3;
 
+interface ExtractedCardSideResult {
+  entry: BusinessCardEntry;
+  confidence: number;
+}
+
 function getBatchSnapshot(items: BatchCardItem[]): BatchProgressSnapshot {
   const snapshot: BatchProgressSnapshot = {
     total: items.length,
@@ -302,7 +307,7 @@ function withBusinessCardMetadata(item: BatchCardItem, rows: BusinessCardEntry[]
   return rows.map((row) => {
     const hasCoreFields = [row.fullName, row.firstName, row.lastName, row.company, row.email, row.phone]
       .some((value) => (value ?? '').trim().length > 0);
-    const hasConflicts = (row.conflictFields?.length ?? 0) > 0;
+    const hasConflicts = (row.conflictFields?.length ?? 0) > 0 || (row.warnings?.length ?? 0) > 0;
     const rowNeedsReview = item.needsReview || !hasCoreFields || hasConflicts;
 
     return {
@@ -310,6 +315,15 @@ function withBusinessCardMetadata(item: BatchCardItem, rows: BusinessCardEntry[]
       sourceLabel,
       sourceItemId: item.id,
       sourceCardId: item.id,
+      sourceImageId: item.sourceImageId,
+      sourceImageName: item.sourceImageName,
+      sourceImageUrl: item.sourceImageUrl,
+      cropIndex: item.cropIndex,
+      cropImageUrl: item.front.previewUrl,
+      scanMode: item.scanMode ?? 'single-card',
+      frontBackStatus: item.back ? 'front-and-back' : 'front-only',
+      confidence: row.confidence ?? item.confidence,
+      warnings: [...(item.warnings ?? []), ...(row.warnings ?? [])],
       sourceType: item.front.sourceType,
       hasBack: Boolean(item.back),
       frontPreviewUrl: item.front.previewUrl,
@@ -320,13 +334,128 @@ function withBusinessCardMetadata(item: BatchCardItem, rows: BusinessCardEntry[]
   });
 }
 
-async function extractCardSide(side: CardImageSide): Promise<BusinessCardEntry> {
+function collectEmails(text: string): string[] {
+  const matches = text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) ?? [];
+  return Array.from(new Set(matches.map((value) => value.toLowerCase())));
+}
+
+function collectPhones(text: string): string[] {
+  const matches = text.match(/(?:\+?\d[\d\s().-]{8,}\d)/g) ?? [];
+  return Array.from(new Set(matches.map((value) => value.trim())));
+}
+
+function collectLikelyNames(text: string): string[] {
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  const names = lines.filter((line) => {
+    const words = line.split(/\s+/).filter(Boolean);
+    if (words.length < 2 || words.length > 4) return false;
+    if (/\d/.test(line)) return false;
+    return words.every((word) => /^[A-Z][a-z'.-]+$/.test(word));
+  });
+
+  return Array.from(new Set(names));
+}
+
+function collectLikelyCompanies(text: string): string[] {
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length >= 3 && line.length <= 64);
+
+  return Array.from(new Set(lines.filter((line) => {
+    if (looksLikeEmail(line) || looksLikePhone(line) || looksLikeWebsite(line)) return false;
+    if (BUSINESS_CARD_COMPANY_HINTS.test(line)) return true;
+    if (/^[A-Z0-9& .'-]{5,}$/.test(line) && line.split(/\s+/).length <= 5) return true;
+    return false;
+  })));
+}
+
+function getDomain(value: string): string {
+  const trimmed = value.trim().toLowerCase();
+  if (!trimmed) return '';
+  if (trimmed.includes('@')) {
+    return trimmed.split('@')[1] ?? '';
+  }
+  try {
+    const normalized = /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+    return new URL(normalized).hostname.replace(/^www\./, '');
+  } catch {
+    return trimmed.replace(/^www\./, '').split('/')[0] ?? '';
+  }
+}
+
+function assessBusinessCardQuality(row: BusinessCardEntry): { confidence: number; warnings: string[]; needsReview: boolean } {
+  const warnings: string[] = [...(row.conflictFields?.length ? [`Conflict fields: ${row.conflictFields.join(', ')}`] : [])];
+  const raw = String(row.rawText ?? '');
+  const emails = collectEmails(`${row.email || ''}\n${raw}`);
+  const phones = collectPhones(`${row.phone || ''}\n${raw}`);
+  const names = collectLikelyNames(raw);
+  const companies = collectLikelyCompanies(raw);
+
+  if (names.length > 1) {
+    warnings.push('More than one likely person name detected.');
+  }
+
+  if (companies.length > 2) {
+    warnings.push('Multiple company-like names detected in one crop.');
+  }
+
+  if (phones.length > 3) {
+    warnings.push('Unusually high number of phone numbers detected.');
+  }
+
+  const missingCoreCount = [row.fullName, row.company, row.email, row.phone]
+    .filter((value) => String(value ?? '').trim().length === 0)
+    .length;
+
+  if (missingCoreCount >= 2) {
+    warnings.push('Required fields are missing.');
+  }
+
+  const emailDomain = getDomain(String(row.email ?? ''));
+  const websiteDomain = getDomain(String(row.website ?? ''));
+  const companyToken = String(row.company ?? '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+  if (emailDomain && websiteDomain && emailDomain !== websiteDomain) {
+    warnings.push('Email domain does not match website domain.');
+  }
+  if (emailDomain && companyToken && !emailDomain.replace(/[^a-z0-9]/g, '').includes(companyToken.slice(0, 5))) {
+    warnings.push('Email domain appears inconsistent with company name.');
+  }
+
+  if ((emails.length >= 2 && companies.length >= 2) || raw.length > 900) {
+    warnings.push('Possible neighboring-card text detected in extraction.');
+  }
+
+  let confidence = row.confidence ?? 0.8;
+  confidence = Math.max(0, Math.min(0.99, confidence - warnings.length * 0.08));
+  if (confidence < 0.55) {
+    warnings.push('OCR confidence is low.');
+  }
+
+  return {
+    confidence,
+    warnings,
+    needsReview: warnings.length > 0,
+  };
+}
+
+async function extractCardSide(side: CardImageSide): Promise<ExtractedCardSideResult> {
   const result = await extractFromImage(side.file, 'business-card');
   const rows = result.entries as BusinessCardEntry[];
   if (!rows.length) {
-    return createEmptyBusinessCard();
+    return {
+      entry: createEmptyBusinessCard(),
+      confidence: 0,
+    };
   }
-  return rows[0];
+  return {
+    entry: rows[0],
+    confidence: result.meta.confidence,
+  };
 }
 
 function mergeBusinessCardSides(front: BusinessCardEntry, back?: BusinessCardEntry): BusinessCardEntry {
@@ -396,9 +525,19 @@ function mergeBusinessCardSides(front: BusinessCardEntry, back?: BusinessCardEnt
 }
 
 export async function extractBusinessCardRecord(item: BatchCardItem): Promise<BusinessCardEntry> {
-  const frontEntry = await extractCardSide(item.front);
-  const backEntry = item.back ? await extractCardSide(item.back) : undefined;
-  return mergeBusinessCardSides(frontEntry, backEntry);
+  const front = await extractCardSide(item.front);
+  const back = item.back ? await extractCardSide(item.back) : undefined;
+  const merged = mergeBusinessCardSides(front.entry, back?.entry);
+  const confidence = Math.min(0.99, ((front.confidence + (back?.confidence ?? front.confidence)) / (back ? 2 : 1)));
+  const assessed = assessBusinessCardQuality({ ...merged, confidence });
+
+  return {
+    ...merged,
+    confidence: assessed.confidence,
+    warnings: assessed.warnings,
+    needsReview: assessed.needsReview,
+    status: assessed.needsReview ? 'needs_review' : 'complete',
+  };
 }
 
 export async function extractBusinessCardBatch(

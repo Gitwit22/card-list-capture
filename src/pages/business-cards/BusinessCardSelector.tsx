@@ -18,7 +18,7 @@ const options = [
   },
   {
     title: 'Upload Multiple Photos',
-    description: 'Upload multiple images, pair front/back in queue, then process as card records.',
+    description: 'Upload photos, scan as single cards or detect multiple cards in one photo, then process in one session.',
     icon: Images,
     path: '/business-cards/upload',
   },
