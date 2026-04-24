@@ -41,6 +41,8 @@ import {
   type ExportFormat,
 } from '@/lib/export';
 import { detectBusinessCardCrops, type DetectionDebugInfo } from '@/lib/multiCardDetection';
+import { CropModal } from '@/components/business-cards/CropModal';
+import { ManualEntryModal } from '@/components/business-cards/ManualEntryModal';
 import { toast } from 'sonner';
 
 type Step = 'capture' | 'batch-queue' | 'processing' | 'batch-processing' | 'review';
@@ -82,6 +84,7 @@ interface WorkflowDetectedCardCrop {
   areaPercent: number;
   warnings: string[];
   queueItemId: string;
+  manualCrop?: boolean;
 }
 
 function makeCardImageSide(capture: QueuedCapture): CardImageSide {
@@ -114,6 +117,22 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
   const [detectionDebugBySource, setDetectionDebugBySource] = useState<Record<string, DetectionDebugInfo>>({});
   const sourceCaptureRef = useRef<Map<string, QueuedCapture>>(new Map());
   const [showDeveloperDebugOverlay, setShowDeveloperDebugOverlay] = useState(Boolean(import.meta.env.DEV));
+  const [cropModalOpen, setCropModalOpen] = useState(false);
+  const [cropModalSource, setCropModalSource] = useState<{
+    batchId: string;
+    sourceImageUrl: string;
+    sourceImageName: string;
+    nextCropIndex: number;
+  } | null>(null);
+  const [manualEntryModalOpen, setManualEntryModalOpen] = useState(false);
+  const [manualEntrySource, setManualEntrySource] = useState<{
+    batchId: string;
+    sourceImageName: string;
+    sourceImageId: string;
+    sourceImageUrl?: string;
+  } | null>(null);
+  const [isAddingManualCrop, setIsAddingManualCrop] = useState(false);
+  const [isAddingManualEntry, setIsAddingManualEntry] = useState(false);
   const [cardBatches, setCardBatches] = useState<CardBatch[]>([]);
   const [isDetecting, setIsDetecting] = useState(false);
   const [batchProgress, setBatchProgress] = useState<BatchProgressSnapshot>(emptySnapshot);
@@ -247,6 +266,9 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
                 extractedRows: item.extractedRows,
                 needsReview: item.needsReview,
                 index: item.index,
+                manualCrop: item.manualCrop,
+                manualEntry: item.manualEntry,
+                manualCropBounds: item.manualCropBounds,
               };
             }),
           );
@@ -318,6 +340,9 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
           extractedRows: item.extractedRows,
           needsReview: item.needsReview,
           index: item.index,
+          manualCrop: item.manualCrop,
+          manualEntry: item.manualEntry,
+          manualCropBounds: item.manualCropBounds,
         };
       }),
     );
@@ -350,6 +375,7 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
           areaPercent: 0,
           warnings: item.warnings ?? [],
           queueItemId: item.id,
+          manualCrop: item.manualCrop,
         })),
     );
     setCardBatches(Array.from(new Map(
@@ -426,7 +452,27 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
 
     queue.forEach((item) => {
       if (item.extractedRows.length > 0) {
-        rows.push(...item.extractedRows);
+        rows.push(...item.extractedRows.map((row) => ({
+          ...row,
+          sourceLabel: row.sourceLabel ?? item.front.filename ?? `Card ${item.index + 1}`,
+          sourceItemId: row.sourceItemId ?? item.id,
+          sourceCardId: row.sourceCardId ?? item.id,
+          sourceImageId: row.sourceImageId ?? item.sourceImageId,
+          sourceImageName: row.sourceImageName ?? item.sourceImageName,
+          sourceImageUrl: row.sourceImageUrl ?? item.sourceImageUrl,
+          cropIndex: row.cropIndex ?? item.cropIndex,
+          cropImageUrl: row.cropImageUrl ?? item.front.previewUrl,
+          scanMode: row.scanMode ?? item.scanMode ?? 'single-card',
+          confidence: row.confidence ?? item.confidence,
+          warnings: [...(item.warnings ?? []), ...(row.warnings ?? [])],
+          sourceType: row.sourceType ?? item.front.sourceType,
+          hasBack: row.hasBack ?? Boolean(item.back),
+          frontPreviewUrl: row.frontPreviewUrl ?? item.front.previewUrl,
+          backPreviewUrl: row.backPreviewUrl ?? item.back?.previewUrl,
+          manualCrop: row.manualCrop ?? item.manualCrop,
+          manualEntry: row.manualEntry ?? item.manualEntry,
+          manualCropBounds: row.manualCropBounds ?? item.manualCropBounds,
+        })));
         return;
       }
 
@@ -451,6 +497,9 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
           needsReview: true,
           status: 'failed',
           error: item.error || 'Extraction failed',
+          manualCrop: item.manualCrop,
+          manualEntry: item.manualEntry,
+          manualCropBounds: item.manualCropBounds,
         });
       }
     });
@@ -544,6 +593,7 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
         extractedRows: [],
         needsReview: crop.warnings.length > 0,
         index: 0,
+        manualCrop: crop.manualCrop,
       }));
 
       setBatchQueue((current) => [...current, ...queueItems].map((item, index) => ({ ...item, index })));
@@ -614,6 +664,202 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
     toast.info(`Re-running detection for ${capture.file.name}...`);
     await queueMultiCardCapture(capture, sourceImageId);
   }, [queueMultiCardCapture]);
+
+  const handleAddManualCrop = useCallback((batchId: string) => {
+    const batch = cardBatches.find((b) => b.id === batchId);
+    if (!batch) return;
+
+    const crops = detectedCardCrops.filter((c) => c.sourceImageId === batchId) ?? [];
+    const nextIndex = Math.max(
+      ...(crops.map((c) => c.cropIndex) ?? []),
+      -1,
+    ) + 1;
+
+    setCropModalSource({
+      batchId,
+      sourceImageUrl: batch.sourceImageUrl || '',
+      sourceImageName: batch.sourceImageName,
+      nextCropIndex: nextIndex,
+    });
+    setCropModalOpen(true);
+  }, [cardBatches, detectedCardCrops]);
+
+  const handleConfirmManualCrop = useCallback(
+    async (cropData: {
+      cropImageBlob: Blob;
+      cropIndex: number;
+      bounds: { x: number; y: number; width: number; height: number };
+    }) => {
+      if (!cropModalSource) return;
+
+      setIsAddingManualCrop(true);
+      try {
+        const cropFile = new File(
+          [cropData.cropImageBlob],
+          `manual-crop-${cropData.cropIndex}.jpg`,
+          { type: 'image/jpeg' },
+        );
+
+        const previewUrl = URL.createObjectURL(cropFile);
+        const cropId = `manual-crop-${Date.now()}-${Math.random()}`;
+
+        // Add to detected crops
+        const newCrop: WorkflowDetectedCardCrop = {
+          id: cropId,
+          sourceImageId: cropModalSource.batchId,
+          sourceImageName: cropModalSource.sourceImageName,
+          sourceImageUrl: cropModalSource.sourceImageUrl,
+          cropIndex: cropData.cropIndex,
+          cropImageUrl: previewUrl,
+          confidence: 0, // Manual crops have 0 confidence (user-verified)
+          aspectRatio: cropData.bounds.width / cropData.bounds.height,
+          areaPercent:
+            (cropData.bounds.width * cropData.bounds.height) /
+            (100 * 100),
+          warnings: ['Manually added crop'],
+          queueItemId: `batch-${cropModalSource.batchId}-${cropData.cropIndex}`,
+          manualCrop: true,
+        };
+
+        setDetectedCardCrops((prev) => [...prev, newCrop]);
+
+        // Queue the crop for extraction
+        const queueItem: BatchCardItem = {
+          id: newCrop.queueItemId,
+          front: {
+            file: cropFile,
+            previewUrl,
+            filename: cropFile.name,
+            sourceType: 'upload',
+          },
+          sourceImageId: cropModalSource.batchId,
+          sourceImageName: cropModalSource.sourceImageName,
+          sourceImageUrl: cropModalSource.sourceImageUrl,
+          cropIndex: cropData.cropIndex,
+          scanMode: 'multi-card',
+          confidence: 0,
+          warnings: ['Manually added crop'],
+          manualCrop: true,
+          manualCropBounds: cropData.bounds,
+          status: 'queued',
+          extractedRows: [],
+          needsReview: false,
+          index: batchQueue.length,
+        };
+
+        setBatchQueue((prev) => [...prev, queueItem].map((item, index) => ({ ...item, index })));
+        toast.success(
+          `Manual crop added as Crop ${cropData.cropIndex}. Ready for processing.`,
+        );
+      } catch (error) {
+        console.error('Error adding manual crop:', error);
+        toast.error('Failed to add manual crop');
+      } finally {
+        setIsAddingManualCrop(false);
+        setCropModalOpen(false);
+      }
+    },
+    [cropModalSource, batchQueue.length],
+  );
+
+  const handleAddManualEntry = useCallback((batchId: string) => {
+    const batch = cardBatches.find((b) => b.id === batchId);
+    if (!batch) return;
+
+    setManualEntrySource({
+      batchId,
+      sourceImageName: batch.sourceImageName,
+      sourceImageId: batch.id,
+      sourceImageUrl: batch.sourceImageUrl,
+    });
+    setManualEntryModalOpen(true);
+  }, [cardBatches]);
+
+  const handleConfirmManualEntry = useCallback(
+    async (entryData: {
+      fullName: string;
+      firstName: string;
+      lastName: string;
+      company: string;
+      title: string;
+      email: string;
+      phone: string;
+      website: string;
+      address: string;
+    }) => {
+      if (!manualEntrySource) return;
+
+      setIsAddingManualEntry(true);
+      try {
+        const entryId = `manual-entry-${Date.now()}-${Math.random()}`;
+        const nextManualIndex = Math.max(
+          ...batchQueue
+            .filter((item) => item.sourceImageId === manualEntrySource.sourceImageId)
+            .map((item) => item.cropIndex ?? -1),
+          -1,
+        ) + 1;
+
+        // Create a blank business card entry with manual data
+        const newEntry: BusinessCardEntry = {
+          id: entryId,
+          fullName: entryData.fullName,
+          firstName: entryData.firstName,
+          lastName: entryData.lastName,
+          company: entryData.company,
+          title: entryData.title,
+          email: entryData.email,
+          phone: entryData.phone,
+          website: entryData.website,
+          address: entryData.address,
+          sourceImageId: manualEntrySource.sourceImageId,
+          sourceImageName: manualEntrySource.sourceImageName,
+          sourceImageUrl: manualEntrySource.sourceImageUrl,
+          cropIndex: nextManualIndex,
+          scanMode: 'multi-card',
+          manualEntry: true,
+          status: 'needs_review',
+          needsReview: true,
+          warnings: ['Manual entry added by user'],
+          rawText: '',
+          extraFields: {},
+          social: '',
+          confidence: 0,
+        };
+
+        // Create a queue item for the manual entry
+        const queueItem: BatchCardItem = {
+          id: entryId,
+          front: {
+            file: new File([], 'manual-entry.txt'),
+            previewUrl: '',
+            filename: 'manual-entry',
+            sourceType: 'upload',
+          },
+          sourceImageId: manualEntrySource.sourceImageId,
+          sourceImageName: manualEntrySource.sourceImageName,
+          sourceImageUrl: manualEntrySource.sourceImageUrl,
+          cropIndex: nextManualIndex,
+          scanMode: 'multi-card',
+          manualEntry: true,
+          warnings: ['Manual entry added by user'],
+          status: 'done', // Manual entries skip extraction
+          extractedRows: [newEntry],
+          needsReview: true,
+          index: batchQueue.length,
+        };
+
+        setBatchQueue((prev) => [...prev, queueItem].map((item, index) => ({ ...item, index })));
+        toast.success('Manual entry created. Review and edit in the review screen.');
+      } catch (error) {
+        console.error('Error adding manual entry:', error);
+        toast.error('Failed to add manual entry');
+      } finally {
+        setIsAddingManualEntry(false);
+        setManualEntryModalOpen(false);
+      }
+    },
+    [manualEntrySource, batchQueue],
+  );
 
   const addCapturesToQueue = useCallback((captures: QueuedCapture[]) => {
     if (captures.length === 0) return;
@@ -1025,15 +1271,19 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
     const ready = batchSessionRows.filter((row) => row.status !== 'failed').length;
     const needsReview = batchSessionRows.filter((row) => row.status === 'needs_review' || row.needsReview).length;
     const failed = batchSessionRows.filter((row) => row.status === 'failed').length;
+    const manualCrops = batchQueue.filter((item) => item.manualCrop).length;
+    const manualEntries = batchQueue.filter((item) => item.manualEntry).length;
 
     return {
       ready,
       photos: cardBatches.length,
       detectedCards: detectedCardCrops.length || batchQueue.length,
+      manualCrops,
+      manualEntries,
       needsReview,
       failed,
     };
-  }, [batchSessionRows, cardBatches.length, detectedCardCrops.length, batchQueue.length]);
+  }, [batchSessionRows, cardBatches.length, detectedCardCrops.length, batchQueue]);
 
   const detectedBySource = useMemo(() => {
     const grouped: Record<string, WorkflowDetectedCardCrop[]> = {};
@@ -1067,6 +1317,13 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
         original: item.sourceImageUrl,
         sourceImageName: item.sourceImageName,
       };
+
+      if (item.sourceImageId && !map[item.sourceImageId]) {
+        map[item.sourceImageId] = {
+          original: item.sourceImageUrl,
+          sourceImageName: item.sourceImageName,
+        };
+      }
     });
 
     if (singleCardDraft) {
@@ -1192,14 +1449,6 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
                     >
                       {showDeveloperDebugOverlay ? 'Debug Overlay: On' : 'Debug Overlay: Off'}
                     </Button>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      onClick={() => toast.info('Manual crop hook placeholder is ready. Full manual crop UI can be added next.')}
-                    >
-                      Add Manual Crop (placeholder)
-                    </Button>
                   </div>
                 )}
               </div>
@@ -1280,7 +1529,13 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
               <div className="rounded-lg border border-border bg-card p-3 space-y-3" data-testid="detection-preview">
                 <div className="flex items-center justify-between gap-2">
                   <p className="text-sm font-medium text-foreground">Detection preview</p>
-                  <p className="text-xs text-muted-foreground">Detected {detectedCardCrops.length} cards</p>
+                  <p className="text-xs text-muted-foreground">
+                    Detected {detectedCardCrops.length} cards
+                    {' | '}Auto detected: {detectedCardCrops.filter((crop) => !crop.manualCrop).length}
+                    {' | '}Manual crops: {sessionCounts.manualCrops}
+                    {' | '}Manual entries: {sessionCounts.manualEntries}
+                    {' | '}Total rows pending/created: {batchQueue.length}
+                  </p>
                 </div>
 
                 {cardBatches
@@ -1296,7 +1551,9 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
                             <p className="text-sm font-medium text-foreground truncate max-w-[340px]">{batch.sourceImageName}</p>
                             <p className="text-xs text-muted-foreground">
                               {debug ? `${debug.imageWidth}x${debug.imageHeight}` : 'Image size unavailable'}
-                              {' | '}Detected: {crops.length}
+                              {' | '}Auto: {crops.filter((crop) => !crop.manualCrop).length}
+                              {' | '}Manual crop: {crops.filter((crop) => crop.manualCrop).length}
+                              {' | '}Manual entry: {batchQueue.filter((item) => item.sourceImageId === batch.id && item.manualEntry).length}
                               {' | '}Rejected: {debug?.rejectedCandidateCount ?? 0}
                             </p>
                           </div>
@@ -1308,9 +1565,19 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
                               type="button"
                               size="sm"
                               variant="outline"
-                              onClick={() => toast.info('Manual crop hook placeholder: add/adjust missing crops here in a future iteration.')}
+                              onClick={() => handleAddManualCrop(batch.id)}
+                              disabled={isDetecting || isAddingManualCrop}
                             >
                               Add manual crop
+                            </Button>
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              onClick={() => handleAddManualEntry(batch.id)}
+                              disabled={isAddingManualEntry}
+                            >
+                              Add manual entry
                             </Button>
                             {batch.sourceImageUrl && (
                               <Button type="button" size="sm" variant="outline" asChild>
@@ -1342,6 +1609,9 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
                               <p className="text-[11px] text-muted-foreground">
                                 Crop {crop.cropIndex} | {Math.round(crop.confidence * 100)}%
                               </p>
+                              {crop.manualCrop && (
+                                <Badge variant="secondary" className="text-[10px]">Manual Crop</Badge>
+                              )}
                               <p className="text-[11px] text-muted-foreground">
                                 x:{crop.aspectRatio.toFixed(2)} | area:{crop.areaPercent.toFixed(2)}%
                               </p>
@@ -1394,11 +1664,17 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
                 {batchQueue.map((item, index) => (
                   <div key={item.id} className="rounded-lg border border-border p-3 bg-card space-y-3">
                     <div className="flex items-start gap-3">
-                      <img
-                        src={item.front.previewUrl}
-                        alt={item.front.filename || `Card ${index + 1} front`}
-                        className="w-20 h-20 rounded-md object-cover border border-border"
-                      />
+                      {item.front.previewUrl ? (
+                        <img
+                          src={item.front.previewUrl}
+                          alt={item.front.filename || `Card ${index + 1} front`}
+                          className="w-20 h-20 rounded-md object-cover border border-border"
+                        />
+                      ) : (
+                        <div className="w-20 h-20 rounded-md border border-dashed border-border bg-muted/30 flex items-center justify-center text-[10px] text-muted-foreground text-center px-1">
+                          Manual entry
+                        </div>
+                      )}
                       <div className="flex-1 min-w-0">
                         <p className="text-sm font-medium text-foreground truncate">{item.front.filename || `Card ${index + 1}`}</p>
                         <p className="text-xs text-muted-foreground">Card #{index + 1}</p>
@@ -1662,6 +1938,28 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
           </div>
         )}
       </main>
+
+      {cropModalSource && (
+        <CropModal
+          sourceImageUrl={cropModalSource.sourceImageUrl}
+          sourceImageName={cropModalSource.sourceImageName}
+          isOpen={cropModalOpen}
+          onClose={() => setCropModalOpen(false)}
+          onConfirm={handleConfirmManualCrop}
+          nextCropIndex={cropModalSource.nextCropIndex}
+          isLoading={isAddingManualCrop}
+        />
+      )}
+
+      {manualEntrySource && (
+        <ManualEntryModal
+          sourceImageName={manualEntrySource.sourceImageName}
+          isOpen={manualEntryModalOpen}
+          onClose={() => setManualEntryModalOpen(false)}
+          onConfirm={handleConfirmManualEntry}
+          isLoading={isAddingManualEntry}
+        />
+      )}
     </div>
   );
 }

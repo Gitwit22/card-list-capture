@@ -13,6 +13,26 @@ export interface SignupEntry {
   extraFields: Record<string, string>;
 }
 
+export interface AdditionalContact {
+  name?: string;
+  phone?: string;
+  email?: string;
+  title?: string;
+}
+
+export interface FieldConfidenceScores {
+  fullName?: number;
+  firstName?: number;
+  lastName?: number;
+  company?: number;
+  title?: number;
+  phone?: number;
+  email?: number;
+  website?: number;
+  address?: number;
+  tagline?: number;
+}
+
 export interface BusinessCardEntry {
   id: string;
   fullName: string;
@@ -25,6 +45,9 @@ export interface BusinessCardEntry {
   email: string;
   website: string;
   address: string;
+  tagline?: string;
+  additionalContacts?: AdditionalContact[];
+  fieldConfidence?: FieldConfidenceScores;
   sourceLabel?: string;
   sourceItemId?: string;
   sourceCardId?: string;
@@ -50,6 +73,15 @@ export interface BusinessCardEntry {
   comment?: string;
   extraFields: Record<string, string>;
   rawText: string;
+  manualCrop?: boolean;
+  manualEntry?: boolean;
+  manualCropBounds?: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  };
+  userEdited?: Set<keyof BusinessCardEntry>;
 }
 
 export type ScanMode = 'single-card' | 'multi-card';
@@ -103,6 +135,14 @@ export interface BatchCardItem {
   extractedRows: BusinessCardEntry[];
   needsReview: boolean;
   index: number;
+  manualCrop?: boolean;
+  manualEntry?: boolean;
+  manualCropBounds?: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  };
 }
 
 export interface BatchProgressSnapshot {

@@ -15,6 +15,10 @@ export interface DetectedCardCrop {
   warnings: string[];
   aspectRatio: number;
   areaPercent: number;
+  sourceImageId?: string;
+  sourceImageName?: string;
+  sourceImageUrl?: string;
+  manualCrop?: boolean;
 }
 
 export interface DetectionCandidateDebug {

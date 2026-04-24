@@ -42,6 +42,14 @@ export interface SerializedBatchItem {
   extractedRows: BusinessCardEntry[];
   needsReview: boolean;
   index: number;
+  manualCrop?: boolean;
+  manualEntry?: boolean;
+  manualCropBounds?: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  };
 }
 
 export interface LocalDraftSession {
