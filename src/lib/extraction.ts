@@ -9,6 +9,7 @@ import {
   SignupEntry,
 } from '@/types/scan';
 import { getConfig } from '@/config/env';
+import { resolveFromRawText } from '@/lib/businessCardResolver';
 
 interface SigninProcessResponse {
   status: string;
@@ -1788,22 +1789,60 @@ function mapBusinessCard(card: Record<string, unknown>): BusinessCardEntry {
     'rawtext',
   ]);
 
+  // ── Resolver pass: use rawText to fill/correct fields the API got wrong ──
+  const rawTextStr = asCleanString(card.rawText);
+  const resolved = rawTextStr ? resolveFromRawText(rawTextStr) : {};
+
+  // For website: preserve the structured API value as-is (it may include https://).
+  // Only fall back to the resolver's cleaned domain when no structured value exists.
+  const structuredWebsite = (mapped.website || fallbackWebsite).trim();
+  const finalWebsite = structuredWebsite || resolved.website || '';
+
+  // For company: prefer structured API result.
+  // Only use resolver's company when there was NO company data from the API at all
+  // (i.e., not when resolveBusinessCardCompany explicitly rejected a candidate).
+  const hadApiCompanyData = Boolean(mapped.organization || fallbackCompany);
+  const finalCompany = resolvedCompany || (!hadApiCompanyData ? resolved.company ?? '' : '') || '';
+
+  // For fullName: prefer structured API result; fall back to resolver.
+  const apiFullName = splitName.fullName || resolvedFullName;
+  const finalFullName = apiFullName || resolved.fullName || '';
+  const finalFirstName = resolvedFirstName || resolved.firstName || '';
+  const finalLastName = resolvedLastName || resolved.lastName || '';
+
+  // For address: structured first, then resolver.
+  const finalAddress = (mapped.address || fallbackAddress) || resolved.address || '';
+
+  // For phone: structured first, then resolver.
+  const finalPhone = (mapped.phone || fallbackPhone) || resolved.phone || '';
+
+  // Move resolver's otherPhones into extraFields so they surface in review.
+  const resolverExtras: Record<string, string> = {};
+  if (resolved.otherPhones?.length) {
+    resolved.otherPhones.forEach((p, i) => {
+      resolverExtras[`otherPhone${i > 0 ? i + 1 : ''}`] = p;
+    });
+  }
+  if (resolved.credentials) {
+    resolverExtras['credentials'] = resolved.credentials;
+  }
+
   return {
     id: String(card.id ?? crypto.randomUUID()),
-    fullName: splitName.fullName || resolvedFullName,
-    firstName: resolvedFirstName,
-    lastName: resolvedLastName,
+    fullName: finalFullName,
+    firstName: finalFirstName,
+    lastName: finalLastName,
     namePartsExtracted: Boolean(extractedFirstName || extractedLastName),
-    company: resolvedCompany,
-    title: mapped.jobTitle || fallbackTitle,
-    phone: mapped.phone || fallbackPhone,
-    email: mapped.email || fallbackEmail,
-    website: mapped.website || fallbackWebsite,
-    address: mapped.address || fallbackAddress,
+    company: finalCompany,
+    title: mapped.jobTitle || fallbackTitle || resolved.title || '',
+    phone: finalPhone,
+    email: mapped.email || fallbackEmail || resolved.email || '',
+    website: finalWebsite,
+    address: finalAddress,
     social: asCleanString(card.social),
     comment: asCleanString(card.comment),
-    extraFields,
-    rawText: asCleanString(card.rawText),
+    extraFields: { ...resolverExtras, ...extraFields },
+    rawText: rawTextStr,
   };
 }
 
