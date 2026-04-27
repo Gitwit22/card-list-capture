@@ -325,6 +325,66 @@ function getEdgeDistance(a: ComponentBox, b: ComponentBox): number {
   return Math.sqrt(xDistance * xDistance + yDistance * yDistance);
 }
 
+function getAxisGapAndOverlap(
+  aStart: number,
+  aSize: number,
+  bStart: number,
+  bSize: number,
+): { gap: number; overlap: number } {
+  const aEnd = aStart + aSize;
+  const bEnd = bStart + bSize;
+  const overlap = Math.max(0, Math.min(aEnd, bEnd) - Math.max(aStart, bStart));
+  const gap = overlap > 0 ? 0 : Math.max(0, Math.max(aStart - bEnd, bStart - aEnd));
+  return { gap, overlap };
+}
+
+function shouldMergeByProximity(a: ComponentBox, b: ComponentBox): boolean {
+  const minSide = Math.min(a.width, a.height, b.width, b.height);
+  const maxGap = Math.max(4, Math.round(minSide * 0.04));
+
+  const horizontal = getAxisGapAndOverlap(a.x, a.width, b.x, b.width);
+  const vertical = getAxisGapAndOverlap(a.y, a.height, b.y, b.height);
+
+  if (horizontal.gap > maxGap || vertical.gap > maxGap) {
+    return false;
+  }
+
+  // If both axes have gaps, boxes are diagonally separate and should not merge.
+  if (horizontal.gap > 0 && vertical.gap > 0) {
+    return false;
+  }
+
+  if (horizontal.gap > 0) {
+    const overlapRatio = vertical.overlap / Math.max(1, Math.min(a.height, b.height));
+    if (overlapRatio < 0.55) {
+      return false;
+    }
+  }
+
+  if (vertical.gap > 0) {
+    const overlapRatio = horizontal.overlap / Math.max(1, Math.min(a.width, b.width));
+    if (overlapRatio < 0.55) {
+      return false;
+    }
+  }
+
+  const merged = mergeBoxes(a, b);
+  const mergedArea = merged.width * merged.height;
+  const componentArea = a.width * a.height + b.width * b.height;
+  const whitespaceRatio = (mergedArea - componentArea) / Math.max(1, mergedArea);
+  if (whitespaceRatio > 0.22) {
+    return false;
+  }
+
+  const ratio = merged.width / Math.max(1, merged.height);
+  const normalizedRatio = ratio >= 1 ? ratio : 1 / Math.max(0.0001, ratio);
+  if (normalizedRatio > 3.8) {
+    return false;
+  }
+
+  return true;
+}
+
 function mergeNearbyBoxes(boxes: ComponentBox[]): ComponentBox[] {
   const working = [...boxes];
   let merged = true;
@@ -337,8 +397,7 @@ function mergeNearbyBoxes(boxes: ComponentBox[]): ComponentBox[] {
         const a = working[i];
         const b = working[j];
 
-        const nearbyThreshold = Math.max(8, Math.round(Math.min(a.width, a.height, b.width, b.height) * 0.1));
-        if (getIoU(a, b) > 0.12 || getEdgeDistance(a, b) <= nearbyThreshold) {
+        if (getIoU(a, b) > 0.12 || shouldMergeByProximity(a, b)) {
           working[i] = mergeBoxes(a, b);
           working.splice(j, 1);
           merged = true;
@@ -371,6 +430,11 @@ function nonMaximumSuppression(boxes: ComponentBox[], iouThreshold = 0.4): Compo
 
   return kept;
 }
+
+export const multiCardDetectionTestUtils = {
+  mergeNearbyBoxes,
+  shouldMergeByProximity,
+};
 
 function sortReadingOrder(boxes: ComponentBox[]): ComponentBox[] {
   if (boxes.length <= 1) return boxes;

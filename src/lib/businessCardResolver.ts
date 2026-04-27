@@ -1,613 +1,450 @@
-import { AdditionalContact, BusinessCardEntry, FieldConfidenceScores } from '@/types/scan';
+/**
+ * businessCardResolver.ts
+ *
+ * Pure text-based parser for business card OCR output.
+ * Prefers rawText over markdown (markdown can inject <sub>®</sub> and merge lines).
+ * Does NOT call any API — operates only on the string passed in.
+ */
 
-interface OCRLine {
-  text: string;
-  confidence?: number;
-  rotation?: number;
+// ─── Credential suffixes to strip from person names ───────────────────────────
+const CREDENTIAL_SUFFIXES = new Set([
+  'RDN', 'RN', 'LPN', 'CNA', 'NP', 'APRN', 'CNP', 'NNP', 'CRNA',
+  'MD', 'DO', 'DDS', 'DMD', 'OD', 'DVM', 'DPT', 'PharmD',
+  'PhD', 'EdD', 'PsyD', 'DNP',
+  'PA', 'LCSW', 'LMSW', 'LSW', 'LPC', 'LPCC',
+  'CPA', 'CFP', 'MBA', 'JD', 'Esq',
+  'PE', 'PMP', 'CISA', 'CISSP',
+]);
+
+// ─── US state abbreviations ────────────────────────────────────────────────────
+const US_STATES = new Set([
+  'AL','AK','AZ','AR','CA','CO','CT','DE','FL','GA',
+  'HI','ID','IL','IN','IA','KS','KY','LA','ME','MD',
+  'MA','MI','MN','MS','MO','MT','NE','NV','NH','NJ',
+  'NM','NY','NC','ND','OH','OK','OR','PA','RI','SC',
+  'SD','TN','TX','UT','VT','VA','WA','WV','WI','WY','DC',
+]);
+
+// ─── Generic service/category words that are never person names ───────────────
+const SERVICE_WORDS = new Set([
+  'photography', 'catering', 'consulting', 'construction', 'ministry',
+  'ministries', 'services', 'solutions', 'health', 'wellness', 'fitness',
+  'media', 'marketing', 'design', 'creative', 'studio', 'group',
+  'associates', 'agency', 'network', 'realty', 'insurance', 'financial',
+]);
+
+// ─── Street suffix patterns ────────────────────────────────────────────────────
+const STREET_SUFFIX_RE = /\b(st|street|ave|avenue|blvd|boulevard|dr|drive|rd|road|ln|lane|ct|court|pl|place|pkwy|parkway|hwy|highway|way|cir|circle|ter|terrace|box|p\.?o\.?\s*box)\b/i;
+
+// ─── City/state/ZIP line pattern ───────────────────────────────────────────────
+// e.g. "Detroit, MI 48202" or "Winter Park, FL 32790"
+const CITY_STATE_ZIP_RE = /^[A-Za-z .'-]+,\s*[A-Z]{2}\s+\d{5}(-\d{4})?$/;
+
+// ─── Bare state abbreviation line ─────────────────────────────────────────────
+const BARE_STATE_RE = /^[A-Z]{2}$/;
+
+// ─── ZIP code token ───────────────────────────────────────────────────────────
+const ZIP_RE = /\b\d{5}(-\d{4})?\b/;
+
+// ─── Phone number pattern ─────────────────────────────────────────────────────
+const PHONE_RE = /(?:\+?\d[\d\s()./-]{7,}\d)/g;
+const PHONE_LABEL_RE = /\b(mobile|cell|office|work|fax|direct|main|hq|toll\s*free)\b/i;
+
+// ─── Email pattern ────────────────────────────────────────────────────────────
+const EMAIL_RE = /[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}/gi;
+
+// ─── Domain/URL pattern ───────────────────────────────────────────────────────
+// Matches things like "example.com", "www.example.com", "https://example.com/path"
+const DOMAIN_LIKE_RE = /(?:https?:\/\/)?(?:www\.)?([A-Za-z0-9](?:[A-Za-z0-9\-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,}(?:\/[^\s<>"]*)?\b/g;
+
+// ─── HTML junk ────────────────────────────────────────────────────────────────
+const HTML_TAG_RE = /<[^>]+>/g;
+
+// ─── All-caps word check (logo/brand line) ────────────────────────────────────
+// No lowercase letters, at least one uppercase letter, allow brand chars.
+function isAllCapsWord(word: string): boolean {
+  return word.length >= 1 && /[A-Z]/.test(word) && !/[a-z]/.test(word);
 }
 
-interface ResolverContext {
-  ocrText: string;
-  ocrLines: OCRLine[];
-  existingExtraction?: Partial<BusinessCardEntry>;
-  cropMetadata?: {
-    rotation?: number;
-    orientation?: 'normal' | 'rotated90' | 'rotated180' | 'rotated270';
-  };
-  debugOutput?: boolean;
+function isAllCapsLine(line: string): boolean {
+  const words = line.split(/\s+/).filter(Boolean);
+  return words.length >= 1 && words.length <= 5 && words.every(isAllCapsWord);
 }
 
-interface ResolverResult {
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function stripHtml(text: string): string {
+  // Replace tags/entities with space but preserve newlines for line splitting.
+  return text
+    .replace(HTML_TAG_RE, ' ')
+    .replace(/&[a-z]+;/gi, ' ')
+    .replace(/[^\S\n]+/g, ' ');  // collapse non-newline whitespace only
+}
+
+function looksLikePhone(line: string): boolean {
+  const digits = line.replace(/\D/g, '');
+  return digits.length >= 10 && digits.length <= 15;
+}
+
+function looksLikeEmail(line: string): boolean {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(line.trim());
+}
+
+function looksLikeDomain(line: string): boolean {
+  const cleaned = line.trim().toLowerCase().replace(/^https?:\/\//i, '').replace(/^www\./i, '');
+  return /^[a-z0-9][a-z0-9\-]*\.[a-z]{2,}(\/|$)/i.test(cleaned);
+}
+
+function looksLikeAddress(line: string): boolean {
+  return STREET_SUFFIX_RE.test(line) || /^P\.?\s*O\.?\s*Box/i.test(line) || ZIP_RE.test(line) || CITY_STATE_ZIP_RE.test(line);
+}
+
+function looksLikeCityStateZip(line: string): boolean {
+  return CITY_STATE_ZIP_RE.test(line.trim());
+}
+
+function isBareState(line: string): boolean {
+  return BARE_STATE_RE.test(line.trim()) && US_STATES.has(line.trim());
+}
+
+/**
+ * Strip trailing credential tokens from a name string.
+ * "Leah Oldham, RDN" → { name: "Leah Oldham", credentials: ["RDN"] }
+ */
+function stripCredentials(raw: string): { name: string; credentials: string[] } {
+  // Remove commas and check each trailing token
+  const parts = raw.split(/[\s,]+/).filter(Boolean);
+  const credentials: string[] = [];
+
+  while (parts.length > 0) {
+    const last = parts[parts.length - 1];
+    if (CREDENTIAL_SUFFIXES.has(last)) {
+      credentials.unshift(last);
+      parts.pop();
+    } else {
+      break;
+    }
+  }
+
+  return { name: parts.join(' '), credentials };
+}
+
+/**
+ * Title-case a string that is all-uppercase (e.g. "HENRY FORD HEALTH" → "Henry Ford Health").
+ * Leaves mixed-case strings alone.
+ */
+function toTitleCase(str: string): string {
+  if (str !== str.toUpperCase()) return str; // already mixed
+  return str
+    .toLowerCase()
+    .replace(/(?:^|\s)\S/g, (c) => c.toUpperCase())
+    .replace(/®|™/g, '');
+}
+
+/**
+ * Clean a raw website string to just the domain.
+ * Strips HTML tags, OCR junk, merged trailing words, phone numbers, emails.
+ */
+export function cleanWebsite(raw: string): string {
+  if (!raw) return '';
+
+  // Strip HTML tags and entities
+  let cleaned = stripHtml(raw);
+
+  // Remove email addresses
+  cleaned = cleaned.replace(EMAIL_RE, ' ');
+
+  // Remove phone-like digit runs
+  cleaned = cleaned.replace(/\b\d[\d\s()./-]{6,}\d\b/g, ' ');
+
+  // Remove ®, ™ junk
+  cleaned = cleaned.replace(/[®™]/g, '');
+
+  // Find first domain-like token
+  const domainMatch = cleaned.match(DOMAIN_LIKE_RE);
+  if (!domainMatch) return '';
+
+  const raw_domain = domainMatch[0].trim();
+
+  // Normalize: strip protocol, www, trailing path for cleanliness
+  const domain = raw_domain
+    .replace(/^https?:\/\//i, '')
+    .replace(/^www\./i, '')
+    .split(/\s/)[0]  // cut at any whitespace (OCR merged words)
+    ?? '';
+
+  // Reject if contains spaces (OCR junk merged in)
+  if (domain.includes(' ')) return '';
+
+  return domain.toLowerCase();
+}
+
+/**
+ * Check if a line is a valid person name candidate.
+ */
+function isPersonNameCandidate(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed) return false;
+  if (looksLikeEmail(trimmed)) return false;
+  if (looksLikePhone(trimmed)) return false;
+  if (looksLikeDomain(trimmed)) return false;
+  if (looksLikeAddress(trimmed)) return false;
+  if (looksLikeCityStateZip(trimmed)) return false;
+  if (isBareState(trimmed)) return false;
+  if (ZIP_RE.test(trimmed)) return false;
+  if (/^P\.?\s*O\.?\s*Box/i.test(trimmed)) return false;
+
+  // Strip credentials first to get just the name part
+  const { name } = stripCredentials(trimmed);
+  const words = name.split(/\s+/).filter(Boolean);
+
+  if (words.length < 2 || words.length > 5) return false;
+
+  // Reject single service/category words
+  if (words.length === 1 && SERVICE_WORDS.has(words[0].toLowerCase())) return false;
+
+  // Must look like human name tokens — allow mixed case, no digits
+  if (/\d/.test(name)) return false;
+  if (!/^[A-Za-z'\-. ]+$/.test(name)) return false;
+
+  // Reject if ALL tokens are service words
+  if (words.every((w) => SERVICE_WORDS.has(w.toLowerCase()))) return false;
+
+  // Reject if bare all-caps with only 1-2 chars (state abbrev leaking)
+  if (isBareState(name)) return false;
+
+  return true;
+}
+
+export interface ResolvedCard {
   fullName: string;
   firstName: string;
   lastName: string;
+  credentials: string;
   company: string;
   title: string;
   phone: string;
+  otherPhones: string[];
   email: string;
   website: string;
   address: string;
-  tagline: string;
-  additionalContacts: AdditionalContact[];
-  confidence: number;
-  fieldConfidence: FieldConfidenceScores;
-  warnings: string[];
+  extraFields: Record<string, string>;
 }
 
-type ScoredLine = {
-  line: string;
-  index: number;
-  personScore: number;
-  companyScore: number;
-  titleScore: number;
-  addressScore: number;
-  taglineScore: number;
-  hasEmail: boolean;
-  hasPhone: boolean;
-  hasWebsite: boolean;
-};
+/**
+ * Resolve structured fields from raw OCR text of a business card.
+ * This is the main export used by mapBusinessCard in extraction.ts.
+ */
+export function resolveFromRawText(rawText: string): Partial<ResolvedCard> {
+  if (!rawText || !rawText.trim()) return {};
 
-const EMAIL_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
-const PHONE_RE = /(?:\+?\d[\d().\s-]{8,}\d)/g;
-const DOMAIN_RE = /(?:https?:\/\/)?(?:www\.)?([a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:com|org|net|edu|gov|io|co|us|biz|info))/gi;
+  // Strip HTML artifacts first (markdown can produce <sub>®</sub> etc.)
+  const cleaned = stripHtml(rawText);
 
-const STATE_SET = new Set([
-  'AL', 'AK', 'AZ', 'AR', 'CA', 'CO', 'CT', 'DE', 'FL', 'GA', 'HI', 'ID', 'IL', 'IN', 'IA', 'KS', 'KY', 'LA',
-  'ME', 'MD', 'MA', 'MI', 'MN', 'MS', 'MO', 'MT', 'NE', 'NV', 'NH', 'NJ', 'NM', 'NY', 'NC', 'ND', 'OH', 'OK',
-  'OR', 'PA', 'RI', 'SC', 'SD', 'TN', 'TX', 'UT', 'VT', 'VA', 'WA', 'WV', 'WI', 'WY',
-]);
-
-const COMPANY_WORDS = [
-  'LLC', 'INC', 'CORP', 'COMPANY', 'CO', 'FOUNDATION', 'ORGANIZATION', 'AGENCY', 'DEPARTMENT', 'MINISTRIES',
-  'SERVICES', 'SERVICE', 'STUDIO', 'FILMS', 'FILM', 'PHOTOGRAPHY', 'SHOP', 'CENTER', 'RENTAL', 'GROUP',
-];
-
-const TITLE_WORDS = [
-  'DIRECTOR', 'MANAGER', 'PRESIDENT', 'FOUNDER', 'CEO', 'COO', 'CFO', 'CTO', 'OWNER', 'SPECIALIST',
-  'COORDINATOR', 'OFFICER', 'CONSULTANT', 'REPRESENTATIVE', 'LEGISLATIVE', 'POLITICAL', 'DIETITIAN',
-  'FILMMAKER', 'PHOTOGRAPHER', 'ENGINEER', 'DEVELOPER', 'DESIGNER',
-];
-
-const SERVICE_WORDS = [
-  'FILM', 'PHOTOGRAPHY', 'RENTAL', 'CATERING', 'BARTENDER', 'REPAIR', 'APPLIANCE', 'LUXURY', 'SPECIALIZING',
-  'SERVICES', 'SERVICE', 'YACHT',
-];
-
-const KNOWN_ACRONYMS = new Set(['LLC', 'INC', 'CO', 'CEO', 'COO', 'CFO', 'CTO', 'VP', 'USA']);
-
-const ADDRESS_WORDS = [
-  'STREET', 'ST', 'ROAD', 'RD', 'AVENUE', 'AVE', 'BOULEVARD', 'BLVD', 'LANE', 'LN', 'DRIVE', 'DR', 'SUITE',
-  'STE', 'FLOOR', 'FL', 'BUILDING', 'BLDG', 'CENTER', 'APT', 'APARTMENT', 'P.O. BOX', 'PO BOX', 'P O BOX',
-];
-
-function normalizeToken(value: string): string {
-  return value.toLowerCase().replace(/[^a-z0-9]/g, '');
-}
-
-function normalizeWhitespace(value: string): string {
-  return value.replace(/\s+/g, ' ').trim();
-}
-
-function toTitleCasePreserveAcronyms(value: string): string {
-  const words = normalizeWhitespace(value).split(' ').filter(Boolean);
-  const lowerWords = new Set(['and', 'or', 'for', 'of', 'the', 'a', 'an', 'to', 'in']);
-  return words
-    .map((word, index) => {
-      if (KNOWN_ACRONYMS.has(word.toUpperCase())) return word.toUpperCase();
-      if (/^[A-Z]\.$/.test(word)) return word;
-      const lower = word.toLowerCase();
-      if (index > 0 && lowerWords.has(lower)) return lower;
-      return `${lower.charAt(0).toUpperCase()}${lower.slice(1)}`;
-    })
-    .join(' ');
-}
-
-function toSentenceCase(value: string): string {
-  const clean = normalizeWhitespace(value).toLowerCase();
-  if (!clean) return '';
-  return `${clean.charAt(0).toUpperCase()}${clean.slice(1)}`;
-}
-
-function splitName(fullName: string): { firstName: string; lastName: string } {
-  const name = normalizeWhitespace(fullName);
-  if (!name) return { firstName: '', lastName: '' };
-
-  const comma = /^([^,]+),\s*(.+)$/.exec(name);
-  if (comma) {
-    const first = toTitleCasePreserveAcronyms(comma[2]);
-    const last = toTitleCasePreserveAcronyms(comma[1]);
-    return { firstName: first, lastName: last };
-  }
-
-  const tokens = name.split(' ');
-  if (tokens.length === 1) return { firstName: toTitleCasePreserveAcronyms(tokens[0]), lastName: '' };
-
-  return {
-    firstName: toTitleCasePreserveAcronyms(tokens[0]),
-    lastName: toTitleCasePreserveAcronyms(tokens.slice(1).join(' ')),
-  };
-}
-
-function extractEmails(text: string): string[] {
-  const matches = text.match(EMAIL_RE) ?? [];
-  return Array.from(new Set(matches.map((m) => m.toLowerCase())));
-}
-
-function extractDomains(text: string): string[] {
-  const domains: string[] = [];
-  for (const match of text.matchAll(DOMAIN_RE)) {
-    const domain = (match[1] || '').toLowerCase();
-    if (domain) domains.push(domain);
-  }
-  return Array.from(new Set(domains));
-}
-
-function extractPhones(text: string): string[] {
-  const matches = text.match(PHONE_RE) ?? [];
-  const formatted = matches
-    .map((m) => normalizePhone(m))
-    .filter(Boolean) as string[];
-  return Array.from(new Set(formatted));
-}
-
-function normalizePhone(value: string): string {
-  const digits = value.replace(/\D/g, '');
-  if (digits.length < 10) return normalizeWhitespace(value);
-  const local = digits.length > 10 ? digits.slice(digits.length - 10) : digits;
-  return `${local.slice(0, 3)}-${local.slice(3, 6)}-${local.slice(6)}`;
-}
-
-function domainRoot(domain: string): string {
-  const host = domain.toLowerCase().replace(/^https?:\/\//, '').replace(/^www\./, '').split('/')[0];
-  const parts = host.split('.').filter(Boolean);
-  if (parts.length < 2) return parts[0] || '';
-  return parts[parts.length - 2];
-}
-
-function isStateOnlyLine(line: string): boolean {
-  const cleaned = normalizeWhitespace(line).toUpperCase();
-  return cleaned.length === 2 && STATE_SET.has(cleaned);
-}
-
-function hasCityStateZip(line: string): boolean {
-  return /\b[A-Za-z][A-Za-z\s'.-]+,\s*[A-Z]{2}\s+\d{5}(?:-\d{4})?\b/.test(line);
-}
-
-function isAddressLike(line: string): boolean {
-  const upper = line.toUpperCase();
-  if (hasCityStateZip(line)) return true;
-  if (/\b\d{5}(?:-\d{4})?\b/.test(line) && /,\s*[A-Z]{2}\b/.test(line)) return true;
-  return ADDRESS_WORDS.some((word) => upper.includes(word));
-}
-
-function looksLikeTagline(line: string): boolean {
-  const cleaned = normalizeWhitespace(line);
-  if (cleaned.length < 6 || cleaned.length > 120) return false;
-  if (/^(LET'?S|PLEASE)\b/i.test(cleaned)) return true;
-  if (/\b(BUILDING|SPECIALIZING|SERVING|CREATING|DELIVERING|POWER|FOR ALL)\b/i.test(cleaned)) return true;
-  if (/[.!?]$/.test(cleaned)) return true;
-  return false;
-}
-
-function tokenizeName(line: string): string[] {
-  return normalizeWhitespace(line)
-    .replace(/,/g, ' ')
-    .split(/\s+/)
-    .filter(Boolean)
-    .filter((t) => /^[A-Za-z][A-Za-z'.-]*$/.test(t) || /^[A-Za-z]\.?$/.test(t));
-}
-
-function scorePersonName(line: string, emailLocalPart: string): number {
-  const clean = normalizeWhitespace(line);
-  const upper = clean.toUpperCase();
-  const tokens = tokenizeName(clean);
-
-  if (!clean || clean.includes('@') || extractDomains(clean).length > 0) return -10;
-  if (isAddressLike(clean) || isStateOnlyLine(clean)) return -10;
-  if (tokens.length < 2 || tokens.length > 4) return -8;
-  if (/\d/.test(clean)) return -8;
-  if (COMPANY_WORDS.some((w) => upper.includes(w))) return -6;
-  if (TITLE_WORDS.some((w) => upper.includes(w))) return -4;
-  if (SERVICE_WORDS.some((w) => upper.includes(w))) return -4;
-
-  let score = 5;
-  const localTokens = emailLocalPart.split(/[._-]+/).filter(Boolean);
-  if (localTokens.length > 0) {
-    const normTokens = tokens.map((t) => normalizeToken(t));
-    if (localTokens.some((lt) => normTokens.includes(normalizeToken(lt)))) score += 4;
-  }
-  if (/^[A-Z\s.'-]+$/.test(clean)) score += 1;
-  if (/^[A-Za-z]+,\s*[A-Za-z]/.test(clean)) score += 2;
-
-  return score;
-}
-
-function scoreCompany(line: string, emailDomainRoot: string, websiteDomainRoot: string): number {
-  const clean = normalizeWhitespace(line);
-  const upper = clean.toUpperCase();
-  if (!clean) return -10;
-  if (clean.includes('@')) return -10;
-  if (extractPhones(clean).length > 0) return -10;
-  if (isAddressLike(clean) || isStateOnlyLine(clean)) return -10;
-  if (looksLikeTagline(clean)) return -3;
-
-  let score = 1;
-  if (extractDomains(clean).length > 0) score += 4;
-  if (COMPANY_WORDS.some((w) => upper.includes(w))) score += 3;
-  if (/^[A-Z0-9&.'\-\s]{3,}$/.test(clean) && clean.split(' ').length <= 5) score += 2;
-  if (SERVICE_WORDS.some((w) => upper.includes(w))) score += 1;
-
-  const norm = normalizeToken(clean);
-  if (emailDomainRoot && (norm.includes(emailDomainRoot) || emailDomainRoot.includes(norm))) score += 3;
-  if (websiteDomainRoot && (norm.includes(websiteDomainRoot) || websiteDomainRoot.includes(norm))) score += 3;
-
-  if (scorePersonName(clean, '') >= 7) score -= 6;
-
-  return score;
-}
-
-function scoreTitle(line: string): number {
-  const clean = normalizeWhitespace(line);
-  const upper = clean.toUpperCase();
-  if (!clean || clean.includes('@') || extractDomains(clean).length > 0) return -10;
-  if (isAddressLike(clean)) return -10;
-  if (scorePersonName(clean, '') >= 7) return -8;
-
-  let score = 0;
-  if (TITLE_WORDS.some((w) => upper.includes(w))) score += 5;
-  if (SERVICE_WORDS.some((w) => upper.includes(w))) score += 4;
-  if (clean.split(' ').length >= 2) score += 1;
-  return score;
-}
-
-function scoreAddress(line: string): number {
-  if (!isAddressLike(line)) return 0;
-  let score = 4;
-  if (/P\.?\s*O\.?\s*BOX/i.test(line)) score += 2;
-  if (hasCityStateZip(line)) score += 3;
-  return score;
-}
-
-function scoreTagline(line: string): number {
-  if (!looksLikeTagline(line)) return 0;
-  let score = 3;
-  if (/[.!?]$/.test(normalizeWhitespace(line))) score += 1;
-  if (/\b(BUILDING|SPECIALIZING|LET'?S|PLEASE|POWER)\b/i.test(line)) score += 2;
-  return score;
-}
-
-function inferCompanyFromDomain(domain: string): string {
-  const root = domainRoot(domain);
-  if (!root) return '';
-  let candidate = root;
-
-  if (candidate.endsWith('llc')) {
-    candidate = `${candidate.slice(0, -3)} LLC`;
-  } else if (candidate.endsWith('inc')) {
-    candidate = `${candidate.slice(0, -3)} Inc`;
-  } else if (candidate.endsWith('corp')) {
-    candidate = `${candidate.slice(0, -4)} Corp`;
-  }
-
-  // Light heuristic for common concatenated nouns used in cards.
-  candidate = candidate
-    .replace(/pictures/gi, ' pictures')
-    .replace(/voices/gi, ' voices')
-    .replace(/price/gi, ' price')
-    .replace(/claim/gi, ' claim')
-    .replace(/\s+/g, ' ')
-    .trim();
-
-  return toTitleCasePreserveAcronyms(candidate);
-}
-
-function parseNamePhonePair(line: string): { name: string; phone: string } | null {
-  const match = /^\s*([A-Za-z'.-]+(?:\s+[A-Za-z'.-]+){1,3})\s+(\+?\d[\d().\s-]{8,}\d)\s*$/.exec(line);
-  if (!match) return null;
-
-  const name = toTitleCasePreserveAcronyms(match[1]);
-  const phone = normalizeWhitespace(match[2]);
-  if (!phone || phone.replace(/\D/g, '').length < 10) return null;
-  return { name, phone };
-}
-
-function hasReasonableDomainCompanyRelation(company: string, email: string, website: string): boolean {
-  const companyNorm = normalizeToken(company);
-  if (!companyNorm) return true;
-
-  const emailRoot = domainRoot(email.includes('@') ? email.split('@')[1] : '');
-  const siteRoot = domainRoot(website);
-
-  const roots = [emailRoot, siteRoot].filter(Boolean);
-  if (roots.length === 0) return true;
-
-  return roots.some((root) => {
-    const rootNorm = normalizeToken(root);
-    return companyNorm.includes(rootNorm.slice(0, Math.min(rootNorm.length, 6)))
-      || rootNorm.includes(companyNorm.slice(0, Math.min(companyNorm.length, 6)));
-  });
-}
-
-function applyUserEditedValue(
-  key: keyof BusinessCardEntry,
-  nextValue: string,
-  existing: Partial<BusinessCardEntry> | undefined,
-): string {
-  if (!existing) return nextValue;
-  const edited = existing.userEdited;
-  if (!edited) return nextValue;
-
-  const editedSet = Array.isArray(edited)
-    ? new Set(edited)
-    : edited;
-
-  if (editedSet.has(key)) {
-    const current = (existing[key] ?? '') as string;
-    return current || nextValue;
-  }
-
-  return nextValue;
-}
-
-export function resolveBusinessCardFields(context: ResolverContext): ResolverResult {
-  const debug = (message: string, payload?: unknown) => {
-    if (!context.debugOutput) return;
-    if (payload === undefined) {
-      console.log(`[BizCardResolver] ${message}`);
-      return;
-    }
-    console.log(`[BizCardResolver] ${message}`, payload);
-  };
-
-  const rawLines = context.ocrLines.length > 0
-    ? context.ocrLines.map((l) => l.text)
-    : context.ocrText.split(/\r?\n/);
-
-  const lines = rawLines
-    .map((l) => normalizeWhitespace(l))
+  const lines = cleaned
+    .split(/\r?\n/)
+    .map((l) => l.trim())
     .filter(Boolean);
 
-  const fullText = lines.join('\n') || context.ocrText;
+  if (lines.length === 0) return {};
 
-  const emails = extractEmails(fullText);
-  const websites = extractDomains(fullText);
-  const phones = extractPhones(fullText);
-  const email = emails[0] || '';
-  const website = websites[0] || '';
+  // ── 1. Extract emails ─────────────────────────────────────────────────────
+  const emails: string[] = [];
+  for (const line of lines) {
+    const found = line.match(EMAIL_RE);
+    if (found) emails.push(...found.map((e) => e.toLowerCase()));
+  }
+  const email = emails[0] ?? '';
 
-  const emailLocal = email.split('@')[0] || '';
-  const emailDomainRoot = domainRoot(email.includes('@') ? email.split('@')[1] : '');
-  const websiteDomainRoot = domainRoot(website);
+  // ── 2. Extract phones ─────────────────────────────────────────────────────
+  // Collect (phone, label) pairs
+  const phonePairs: Array<{ number: string; label: string }> = [];
+  for (const line of lines) {
+    if (looksLikeEmail(line)) continue;
+    if (looksLikeAddress(line)) continue;       // skip street lines
+    if (looksLikeCityStateZip(line)) continue;  // skip "City, ST ZIP"
+    if (ZIP_RE.test(line) && !PHONE_LABEL_RE.test(line)) continue; // skip standalone ZIP
+    const matches = [...line.matchAll(PHONE_RE)];
+    for (const m of matches) {
+      const number = m[0].trim();
+      // Require >= 10 digits (real phone, not a ZIP fragment)
+      if (number.replace(/\D/g, '').length < 10) continue;
+      const labelMatch = line.match(PHONE_LABEL_RE);
+      const label = labelMatch ? labelMatch[1].toLowerCase() : '';
+      phonePairs.push({ number, label });
+    }
+  }
 
-  const scored: ScoredLine[] = lines.map((line, index) => ({
-    line,
-    index,
-    personScore: scorePersonName(line, emailLocal),
-    companyScore: scoreCompany(line, emailDomainRoot, websiteDomainRoot),
-    titleScore: scoreTitle(line),
-    addressScore: scoreAddress(line),
-    taglineScore: scoreTagline(line),
-    hasEmail: extractEmails(line).length > 0,
-    hasPhone: extractPhones(line).length > 0,
-    hasWebsite: extractDomains(line).length > 0,
-  }));
+  // Prefer "office" or unlabeled as primary, "mobile"/"cell" as other
+  const officePhone = phonePairs.find((p) => p.label === 'office' || p.label === 'work')?.number ?? '';
+  const mobilePhone = phonePairs.find((p) => p.label === 'mobile' || p.label === 'cell')?.number ?? '';
+  const firstPhone = phonePairs[0]?.number ?? '';
 
-  debug('OCR raw text', fullText);
-  debug('OCR lines', lines);
-  debug('Candidate scores', scored);
+  const phone = officePhone || (phonePairs.length === 1 ? firstPhone : '') || mobilePhone || firstPhone;
+  const otherPhones = phonePairs
+    .map((p) => (p.label ? `${p.number} ${p.label}` : p.number).trim())
+    .filter((p) => p.replace(/\s*(office|work)$/i, '').trim() !== phone.trim());
 
-  const used = new Set<number>();
+  // ── 3. Extract website ────────────────────────────────────────────────────
+  let website = '';
+  for (const line of lines) {
+    if (looksLikeEmail(line)) continue;
+    if (looksLikePhone(line)) continue;
+    const candidate = cleanWebsite(line);
+    if (candidate) {
+      website = candidate;
+      break;
+    }
+  }
 
-  const pickBest = (field: keyof Pick<ScoredLine, 'personScore' | 'companyScore' | 'titleScore' | 'addressScore' | 'taglineScore'>, minScore = 1) => {
-    const best = [...scored]
-      .filter((row) => !used.has(row.index))
-      .sort((a, b) => b[field] - a[field])[0];
-
-    if (!best || best[field] < minScore) return null;
-    used.add(best.index);
-    return best;
-  };
-
-  const namePhonePairs = lines
-    .map((line, idx) => {
-      const pair = parseNamePhonePair(line);
-      if (!pair) return null;
-      return { ...pair, index: idx };
-    })
-    .filter(Boolean) as Array<{ name: string; phone: string; index: number }>;
-
-  const businessFirstLikely = namePhonePairs.length >= 2;
-
-  const bestPerson = pickBest('personScore', 4);
-  const bestCompany = pickBest('companyScore', 2);
-  const bestTitle = pickBest('titleScore', 4);
-
-  const addressRows = [...scored]
-    .filter((row) => row.addressScore > 0)
-    .sort((a, b) => a.index - b.index);
-
+  // ── 4. Extract address ────────────────────────────────────────────────────
+  // Look for a street line followed by (or preceded by) a city/state/ZIP line
   let address = '';
-  if (addressRows.length > 0) {
-    const parts: string[] = [];
-    for (const row of addressRows) {
-      const value = row.line;
-      if (!parts.some((p) => normalizeToken(p) === normalizeToken(value))) {
-        parts.push(value);
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const next = lines[i + 1] ?? '';
+
+    if (/^P\.?\s*O\.?\s*Box/i.test(line) || STREET_SUFFIX_RE.test(line)) {
+      if (CITY_STATE_ZIP_RE.test(next)) {
+        address = `${line}, ${next}`;
+        break;
+      }
+      if (ZIP_RE.test(next) || (US_STATES.has(next.split(/[\s,]+/)[1] ?? ''))) {
+        address = `${line}, ${next}`;
+        break;
+      }
+      address = line;
+      // keep looking for city/state line
+    }
+
+    if (CITY_STATE_ZIP_RE.test(line) && !address) {
+      // Check if previous line was a street
+      const prev = lines[i - 1] ?? '';
+      if (STREET_SUFFIX_RE.test(prev) || /^P\.?\s*O\.?\s*Box/i.test(prev)) {
+        address = `${prev}, ${line}`;
+      } else {
+        address = line;
+      }
+      break;
+    }
+  }
+
+  // ── 5. Detect stacked brand/logo lines → company ─────────────────────────
+  // Consecutive all-caps lines near the top (before any name/email/phone) form the company name
+  let company = '';
+  let companyEndIndex = -1;
+
+  {
+    const stackedCaps: string[] = [];
+    let stackStart = -1;
+    let i = 0;
+
+    // Scan the first 8 lines for all-caps stacks
+    for (; i < Math.min(lines.length, 8); i++) {
+      const line = lines[i];
+      // Skip lines that are clearly phones/emails/domains at the very top
+      if (looksLikeEmail(line) || looksLikePhone(line)) break;
+
+      if (isAllCapsLine(line)) {
+        if (stackStart < 0) stackStart = i;
+        stackedCaps.push(toTitleCase(line.replace(/[®™]/g, '').trim()));
+        companyEndIndex = i;
+      } else if (stackedCaps.length > 0) {
+        // Stack broken — stop collecting
+        break;
       }
     }
-    address = parts.join(', ');
-  }
 
-  const taglineRows = [...scored]
-    .filter((row) => row.taglineScore > 0 && !row.hasEmail && !row.hasWebsite && !row.hasPhone)
-    .sort((a, b) => b.taglineScore - a.taglineScore || a.index - b.index)
-    .slice(0, 2)
-    .sort((a, b) => a.index - b.index);
-  const tagline = taglineRows.map((row) => toSentenceCase(row.line)).join(' / ');
-
-  let fullName = bestPerson ? toTitleCasePreserveAcronyms(bestPerson.line) : '';
-  let company = bestCompany ? toTitleCasePreserveAcronyms(bestCompany.line) : '';
-  const title = bestTitle ? toTitleCasePreserveAcronyms(bestTitle.line) : '';
-
-  if (bestCompany?.hasWebsite) {
-    const domainFromLine = extractDomains(bestCompany.line)[0] || '';
-    company = inferCompanyFromDomain(domainFromLine || website || emailDomainRoot || '');
-  }
-
-  if (businessFirstLikely && !company) {
-    const nonPairCandidates = lines.filter((line, idx) => !namePhonePairs.some((pair) => pair.index === idx));
-    const candidate = nonPairCandidates.find((line) => scoreCompany(line, emailDomainRoot, websiteDomainRoot) >= 2);
-    if (candidate) company = toTitleCasePreserveAcronyms(candidate);
-  }
-
-  if (!company && website) {
-    company = inferCompanyFromDomain(website);
-  }
-
-  if (!company && emailDomainRoot) {
-    company = inferCompanyFromDomain(emailDomainRoot);
-  }
-
-  if (namePhonePairs.length > 0) {
-    if (!fullName && !businessFirstLikely) {
-      fullName = namePhonePairs[0].name;
+    if (stackedCaps.length >= 2) {
+      company = stackedCaps.join(' ');
+    } else if (stackedCaps.length === 1) {
+      // Single all-caps line — may be company if it looks like a brand/domain
+      const single = stackedCaps[0];
+      if (looksLikeDomain(single.toLowerCase())) {
+        // It's a domain-as-company (e.g. BRIONPRICE.COM)
+        // Look at next non-caps line for a service word
+        const nextLineRaw = lines[companyEndIndex + 1] ?? '';
+        const nextWords = nextLineRaw.trim().toLowerCase().split(/\s+/);
+        if (nextWords.length >= 1 && nextWords.every((w) => SERVICE_WORDS.has(w) || /^[a-z]+$/.test(w))) {
+          company = `${single} ${toTitleCase(nextLineRaw)}`;
+          companyEndIndex += 1;
+        } else {
+          company = single;
+        }
+        // website comes from the domain
+        if (!website) {
+          website = cleanWebsite(single.toLowerCase()) || single.toLowerCase().replace(/[®™]/g, '');
+        }
+      } else if (!isBareState(lines[companyEndIndex] ?? single) && !SERVICE_WORDS.has(single.toLowerCase())) {
+        company = single;
+      }
     }
   }
 
-  if (businessFirstLikely && fullName) {
-    // For business-first multi-contact cards without clear primary contact, keep fullName blank.
-    const nameMentionCount = namePhonePairs.filter((pair) => normalizeToken(pair.name) === normalizeToken(fullName)).length;
-    if (nameMentionCount === 0) {
-      fullName = '';
+  // ── 6. Find person name ───────────────────────────────────────────────────
+  let fullName = '';
+  let credentials = '';
+  let nameLineIndex = -1;
+
+  // Search lines after the company block
+  const searchStart = companyEndIndex + 1;
+  for (let i = searchStart; i < lines.length; i++) {
+    const line = lines[i];
+
+    // Skip lines we've already classified
+    if (looksLikeEmail(line)) continue;
+    if (looksLikePhone(line)) continue;
+    if (looksLikeDomain(line)) continue;
+    if (looksLikeAddress(line)) continue;
+    if (looksLikeCityStateZip(line)) continue;
+    if (isBareState(line)) continue;
+    if (PHONE_LABEL_RE.test(line) && looksLikePhone(line.replace(PHONE_LABEL_RE, '').trim())) continue;
+
+    if (isPersonNameCandidate(line)) {
+      const stripped = stripCredentials(line);
+      fullName = stripped.name;
+      credentials = stripped.credentials.join(', ');
+      nameLineIndex = i;
+      break;
     }
   }
 
-  // Convert "Last, First" into "First Last".
-  if (/^[^,]+,\s*.+$/.test(fullName)) {
-    const split = splitName(fullName);
-    fullName = `${split.firstName} ${split.lastName}`.trim();
-  }
+  // ── 7. Split first/last name ──────────────────────────────────────────────
+  const nameParts = fullName.trim().split(/\s+/).filter(Boolean);
+  const firstName = nameParts[0] ?? '';
+  const lastName = nameParts.slice(1).join(' ');
 
-  // Reject company that is just a surname token from the chosen person.
-  if (company && fullName) {
-    const companyNorm = normalizeToken(company);
-    const personTokens = tokenizeName(fullName).map((t) => normalizeToken(t));
-    if (personTokens.includes(companyNorm)) {
-      company = '';
+  // ── 8. Find title (line immediately after name, not an email/phone/address) ─
+  let title = credentials; // credentials go into title if not a separate field
+  if (nameLineIndex >= 0) {
+    for (let i = nameLineIndex + 1; i < lines.length; i++) {
+      const line = lines[i];
+      if (looksLikeEmail(line)) continue;
+      if (looksLikePhone(line)) break;
+      if (looksLikeAddress(line)) break;
+      if (looksLikeDomain(line)) break;
+      if (looksLikeCityStateZip(line)) break;
+      // A title line typically has alphabetic words, possibly with dashes and parens
+      if (/^[A-Za-z]/.test(line) && !/^\d/.test(line)) {
+        const withCredential = credentials ? `${credentials} / ${line}` : line;
+        title = withCredential;
+        break;
+      }
     }
   }
-
-  // Company should not be a state abbreviation.
-  const companyWasStateOnly = Boolean(company) && isStateOnlyLine(company);
-  if (companyWasStateOnly) {
-    company = '';
-  }
-
-  const allPhones = Array.from(new Set([
-    ...phones,
-    ...namePhonePairs.map((pair) => pair.phone),
-  ])).filter(Boolean);
-
-  const additionalContacts: AdditionalContact[] = namePhonePairs.map((pair) => ({
-    name: pair.name,
-    phone: pair.phone,
-  }));
-
-  const phone = allPhones.join(', ');
-
-  const nameParts = splitName(fullName);
-
-  const fieldConfidence: FieldConfidenceScores = {};
-  if (fullName) fieldConfidence.fullName = Math.min(0.99, (bestPerson?.personScore || 7) / 10);
-  if (company) fieldConfidence.company = Math.min(0.99, Math.max(0.55, (bestCompany?.companyScore || 3) / 8));
-  if (title) fieldConfidence.title = Math.min(0.99, (bestTitle?.titleScore || 4) / 8);
-  if (phone) fieldConfidence.phone = 0.95;
-  if (!phone && /\d{3}[\s.-]?\d{4}/.test(fullText)) fieldConfidence.phone = 0.65;
-  if (email) fieldConfidence.email = 0.98;
-  if (website) fieldConfidence.website = 0.9;
-  if (address) fieldConfidence.address = Math.min(0.95, 0.6 + addressRows.length * 0.15);
-  if (tagline) fieldConfidence.tagline = 0.75;
-
-  const warnings: string[] = [];
-
-  if (fullName && company && normalizeToken(fullName) === normalizeToken(company)) {
-    warnings.push('fullName and company conflict; verify fields.');
-  }
-
-  const duplicateNameLike = [...new Set(lines)]
-    .filter((line) => lines.filter((l) => normalizeToken(l) === normalizeToken(line)).length > 1)
-    .some((line) => scorePersonName(line, emailLocal) >= 4);
-  if (duplicateNameLike) {
-    warnings.push('Company and full name are identical; verify classification.');
-  }
-
-  if (companyWasStateOnly || lines.some((line) => isStateOnlyLine(line))) {
-    warnings.push('Company appears to be a state abbreviation; verify classification.');
-  }
-
-  if (!hasReasonableDomainCompanyRelation(company, email, website)) {
-    warnings.push('Email domain appears inconsistent with company name.');
-  }
-
-  if (namePhonePairs.length >= 2 && additionalContacts.length < namePhonePairs.length) {
-    warnings.push('Multiple contacts detected; verify contact mapping.');
-  }
-
-  const lineConfidence = context.ocrLines.length > 0
-    ? context.ocrLines.reduce((sum, l) => sum + (l.confidence ?? 0.8), 0) / context.ocrLines.length
-    : 0.8;
-
-  const rotations = new Set((context.ocrLines ?? []).map((line) => line.rotation).filter((v): v is number => typeof v === 'number'));
-  if ((rotations.size > 1 || (context.cropMetadata?.rotation ?? 0) % 90 !== 0) && lineConfidence < 0.72) {
-    warnings.push('Rotated text detected; verify fields');
-  }
-
-  if (lineConfidence < 0.55) {
-    warnings.push('OCR confidence is low.');
-  }
-
-  const populatedCount = [fullName, company, title, phone, email, website, address].filter(Boolean).length;
-  const confidence = Math.max(0.35, Math.min(0.99, 0.35 + populatedCount * 0.09 + (lineConfidence - 0.5) * 0.2 - warnings.length * 0.03));
-
-  const finalFullName = applyUserEditedValue('fullName', fullName, context.existingExtraction);
-  const finalCompany = applyUserEditedValue('company', company, context.existingExtraction);
-  const finalTitle = applyUserEditedValue('title', title, context.existingExtraction);
-  const finalPhone = applyUserEditedValue('phone', phone, context.existingExtraction);
-  const finalEmail = applyUserEditedValue('email', email, context.existingExtraction);
-  const finalWebsite = applyUserEditedValue('website', website, context.existingExtraction);
-  const finalAddress = applyUserEditedValue('address', address, context.existingExtraction);
-
-  debug('Selected fields', {
-    fullName: finalFullName,
-    company: finalCompany,
-    title: finalTitle,
-    phone: finalPhone,
-    email: finalEmail,
-    website: finalWebsite,
-    address: finalAddress,
-    tagline,
-  });
-  debug('Rejected candidates', scored.filter((row) => row.personScore <= 0 && row.companyScore <= 0));
-  debug('Domain-derived company candidates', {
-    fromWebsite: website ? inferCompanyFromDomain(website) : '',
-    fromEmailDomain: emailDomainRoot ? inferCompanyFromDomain(emailDomainRoot) : '',
-  });
-  debug('Detected additional contacts', additionalContacts);
 
   return {
-    fullName: finalFullName,
-    firstName: nameParts.firstName,
-    lastName: nameParts.lastName,
-    company: finalCompany,
-    title: finalTitle,
-    phone: finalPhone,
-    email: finalEmail,
-    website: finalWebsite,
-    address: finalAddress,
-    tagline,
-    additionalContacts,
-    confidence,
-    fieldConfidence,
-    warnings,
+    fullName,
+    firstName,
+    lastName,
+    credentials,
+    company,
+    title,
+    phone,
+    otherPhones,
+    email,
+    website,
+    address,
+    extraFields: {},
   };
 }
