@@ -29,12 +29,16 @@ export interface DetectionCandidateDebug {
   aspectRatio: number;
   areaPercent: number;
   confidence: number;
+  score?: number;
+  generatedBy?: CandidateOrigin;
 }
 
 export interface DetectionDebugInfo {
   sourceImageName: string;
   imageWidth: number;
   imageHeight: number;
+  preFilterCandidateCount?: number;
+  acceptedCandidateCount?: number;
   detectedCardCount: number;
   candidateCount: number;
   rejectedCandidateCount: number;
@@ -54,7 +58,10 @@ export interface MultiCardDetectionOptions {
   hardMaxCards?: number;
   enableDebugOverlay?: boolean;
   debug?: boolean;
+  minAreaPercent?: number;
 }
+
+type CandidateOrigin = 'component' | 'merge' | 'split' | 'manual';
 
 interface ComponentBox {
   x: number;
@@ -70,9 +77,37 @@ interface CandidateAssessment {
   confidence: number;
   aspectRatio: number;
   areaPercent: number;
+  score: number;
+}
+
+interface CandidateMetrics {
+  areaPercent: number;
+  aspectRatio: number;
+  normalizedRatio: number;
+  rectangularity: number;
+  borderEdgeDensity: number;
+  interiorDensity: number;
+  contrastAgainstBackground: number;
+  outsideEdgeDensity: number;
+}
+
+interface DetectionCandidate {
+  index: number;
+  box: ComponentBox;
+  bounds: DetectionBounds;
+  generatedBy: CandidateOrigin;
+  assessment: CandidateAssessment;
+  metrics: CandidateMetrics;
 }
 
 const MAX_EDGE_DIMENSION = 1400;
+const DEFAULT_MIN_AREA_PERCENT = 0.05;
+const MIN_CARD_RATIO = 1.2;
+const MAX_CARD_RATIO = 2.45;
+const EXTREME_CARD_RATIO = 3.2;
+const INSIDE_SUPPRESSION_THRESHOLD = 0.7;
+const OVERLAP_SUPPRESSION_THRESHOLD = 0.7;
+const MERGE_IOU_THRESHOLD = 0.42;
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
@@ -131,6 +166,69 @@ function normalizeContrast(gray: Uint8Array): Uint8Array {
   }
 
   return normalized;
+}
+
+function boxBlur(gray: Uint8Array, width: number, height: number, radius = 1, passes = 1): Uint8Array {
+  let current = gray;
+  const size = radius * 2 + 1;
+
+  for (let pass = 0; pass < passes; pass += 1) {
+    const horizontal = new Uint16Array(current.length);
+    for (let y = 0; y < height; y += 1) {
+      let sum = 0;
+      const rowOffset = y * width;
+      for (let x = -radius; x <= radius; x += 1) {
+        const sampleX = clamp(x, 0, width - 1);
+        sum += current[rowOffset + sampleX];
+      }
+      for (let x = 0; x < width; x += 1) {
+        horizontal[rowOffset + x] = Math.round(sum / size);
+        const removeX = clamp(x - radius, 0, width - 1);
+        const addX = clamp(x + radius + 1, 0, width - 1);
+        sum += current[rowOffset + addX] - current[rowOffset + removeX];
+      }
+    }
+
+    const output = new Uint8Array(current.length);
+    for (let x = 0; x < width; x += 1) {
+      let sum = 0;
+      for (let y = -radius; y <= radius; y += 1) {
+        const sampleY = clamp(y, 0, height - 1);
+        sum += horizontal[sampleY * width + x];
+      }
+      for (let y = 0; y < height; y += 1) {
+        output[y * width + x] = clamp(Math.round(sum / size), 0, 255);
+        const removeY = clamp(y - radius, 0, height - 1);
+        const addY = clamp(y + radius + 1, 0, height - 1);
+        sum += horizontal[addY * width + x] - horizontal[removeY * width + x];
+      }
+    }
+
+    current = output;
+  }
+
+  return current;
+}
+
+function adaptiveForegroundMask(gray: Uint8Array, width: number, height: number): Uint8Array {
+  const localAverage = boxBlur(gray, width, height, 8, 1);
+  const smoothed = boxBlur(gray, width, height, 1, 1);
+
+  let sumDelta = 0;
+  for (let i = 0; i < gray.length; i += 1) {
+    sumDelta += Math.abs(smoothed[i] - localAverage[i]);
+  }
+
+  const meanDelta = sumDelta / Math.max(1, gray.length);
+  const deltaThreshold = clamp(Math.round(meanDelta * 1.45), 10, 42);
+  const mask = new Uint8Array(gray.length);
+
+  for (let i = 0; i < gray.length; i += 1) {
+    const delta = Math.abs(smoothed[i] - localAverage[i]);
+    mask[i] = delta >= deltaThreshold ? 1 : 0;
+  }
+
+  return closeBinary(mask, width, height);
 }
 
 function edgeMap(gray: Uint8Array, width: number, height: number): Uint8Array {
@@ -227,6 +325,10 @@ function erode(binary: Uint8Array, width: number, height: number, passes = 1): U
 
 function closeBinary(binary: Uint8Array, width: number, height: number): Uint8Array {
   return erode(dilate(binary, width, height, 2), width, height, 1);
+}
+
+function openBinary(binary: Uint8Array, width: number, height: number): Uint8Array {
+  return dilate(erode(binary, width, height, 1), width, height, 1);
 }
 
 function collectConnectedComponents(binary: Uint8Array, width: number, height: number): ComponentBox[] {
@@ -340,7 +442,7 @@ function getAxisGapAndOverlap(
 
 function shouldMergeByProximity(a: ComponentBox, b: ComponentBox): boolean {
   const minSide = Math.min(a.width, a.height, b.width, b.height);
-  const maxGap = Math.max(4, Math.round(minSide * 0.04));
+  const maxGap = Math.max(5, Math.round(minSide * 0.08));
 
   const horizontal = getAxisGapAndOverlap(a.x, a.width, b.x, b.width);
   const vertical = getAxisGapAndOverlap(a.y, a.height, b.y, b.height);
@@ -376,9 +478,18 @@ function shouldMergeByProximity(a: ComponentBox, b: ComponentBox): boolean {
     return false;
   }
 
+  const horizontalGap = getAxisGapAndOverlap(a.x, a.width, b.x, b.width).gap;
+  const verticalGap = getAxisGapAndOverlap(a.y, a.height, b.y, b.height).gap;
+  if (horizontalGap > 0 && horizontalGap > Math.round(Math.min(a.height, b.height) * 0.16)) {
+    return false;
+  }
+  if (verticalGap > 0 && verticalGap > Math.round(Math.min(a.width, b.width) * 0.14)) {
+    return false;
+  }
+
   const ratio = merged.width / Math.max(1, merged.height);
   const normalizedRatio = ratio >= 1 ? ratio : 1 / Math.max(0.0001, ratio);
-  if (normalizedRatio > 3.8) {
+  if (normalizedRatio > 3.2) {
     return false;
   }
 
@@ -411,6 +522,30 @@ function mergeNearbyBoxes(boxes: ComponentBox[]): ComponentBox[] {
   return working;
 }
 
+function overlapOverSmaller(a: ComponentBox, b: ComponentBox): number {
+  const x1 = Math.max(a.x, b.x);
+  const y1 = Math.max(a.y, b.y);
+  const x2 = Math.min(a.x + a.width, b.x + b.width);
+  const y2 = Math.min(a.y + a.height, b.y + b.height);
+  const intersection = Math.max(0, x2 - x1) * Math.max(0, y2 - y1);
+  if (intersection === 0) return 0;
+  const smallerArea = Math.min(a.width * a.height, b.width * b.height);
+  return intersection / Math.max(1, smallerArea);
+}
+
+function insideRatio(inner: ComponentBox, outer: ComponentBox): number {
+  const x1 = Math.max(inner.x, outer.x);
+  const y1 = Math.max(inner.y, outer.y);
+  const x2 = Math.min(inner.x + inner.width, outer.x + outer.width);
+  const y2 = Math.min(inner.y + inner.height, outer.y + outer.height);
+  const intersection = Math.max(0, x2 - x1) * Math.max(0, y2 - y1);
+  return intersection / Math.max(1, inner.width * inner.height);
+}
+
+function computeBoxSignature(box: ComponentBox): string {
+  return `${box.x}:${box.y}:${box.width}:${box.height}:${box.pixels}`;
+}
+
 function nonMaximumSuppression(boxes: ComponentBox[], iouThreshold = 0.4): ComponentBox[] {
   const sorted = [...boxes].sort((a, b) => (b.width * b.height) - (a.width * a.height));
   const kept: ComponentBox[] = [];
@@ -434,6 +569,9 @@ function nonMaximumSuppression(boxes: ComponentBox[], iouThreshold = 0.4): Compo
 export const multiCardDetectionTestUtils = {
   mergeNearbyBoxes,
   shouldMergeByProximity,
+  overlapOverSmaller,
+  insideRatio,
+  splitWideBoxFromProjection,
 };
 
 function sortReadingOrder(boxes: ComponentBox[]): ComponentBox[] {
@@ -467,35 +605,162 @@ function componentToBounds(box: ComponentBox, scale: number, sourceWidth: number
   };
 }
 
-function assessCandidate(box: ComponentBox, imageWidth: number, imageHeight: number): CandidateAssessment {
+function getClosestCardRatioDistance(normalizedRatio: number): number {
+  const targetRatios = [1.4, 1.58, 1.75, 1.95];
+  return Math.min(...targetRatios.map((target) => Math.abs(normalizedRatio - target)));
+}
+
+function measureCandidateMetrics(
+  box: ComponentBox,
+  gray: Uint8Array,
+  edges: Uint8Array,
+  foreground: Uint8Array,
+  imageWidth: number,
+  imageHeight: number,
+): CandidateMetrics {
+  const area = box.width * box.height;
+  const imageArea = imageWidth * imageHeight;
+  const rawRatio = box.width / Math.max(1, box.height);
+  const normalizedRatio = rawRatio >= 1 ? rawRatio : 1 / Math.max(0.0001, rawRatio);
+  const rectangularity = box.pixels / Math.max(1, area);
+
+  let borderEdges = 0;
+  let borderPixels = 0;
+  let interiorForeground = 0;
+  let interiorPixels = 0;
+  let insideSum = 0;
+
+  const left = clamp(box.x, 0, imageWidth - 1);
+  const top = clamp(box.y, 0, imageHeight - 1);
+  const right = clamp(box.x + box.width - 1, left, imageWidth - 1);
+  const bottom = clamp(box.y + box.height - 1, top, imageHeight - 1);
+  const borderThickness = Math.max(2, Math.round(Math.min(box.width, box.height) * 0.05));
+
+  for (let y = top; y <= bottom; y += 1) {
+    const rowOffset = y * imageWidth;
+    for (let x = left; x <= right; x += 1) {
+      const index = rowOffset + x;
+      const isBorder = (
+        x - left < borderThickness
+        || right - x < borderThickness
+        || y - top < borderThickness
+        || bottom - y < borderThickness
+      );
+
+      if (isBorder) {
+        borderPixels += 1;
+        borderEdges += edges[index];
+      } else {
+        interiorPixels += 1;
+        interiorForeground += foreground[index];
+      }
+
+      insideSum += gray[index];
+    }
+  }
+
+  const outsideMargin = Math.max(5, Math.round(Math.min(box.width, box.height) * 0.08));
+  const outerLeft = clamp(left - outsideMargin, 0, imageWidth - 1);
+  const outerTop = clamp(top - outsideMargin, 0, imageHeight - 1);
+  const outerRight = clamp(right + outsideMargin, 0, imageWidth - 1);
+  const outerBottom = clamp(bottom + outsideMargin, 0, imageHeight - 1);
+
+  let outsideSum = 0;
+  let outsideCount = 0;
+  let outsideEdgeCount = 0;
+
+  for (let y = outerTop; y <= outerBottom; y += 1) {
+    const rowOffset = y * imageWidth;
+    for (let x = outerLeft; x <= outerRight; x += 1) {
+      const inside = x >= left && x <= right && y >= top && y <= bottom;
+      if (inside) continue;
+
+      const index = rowOffset + x;
+      outsideSum += gray[index];
+      outsideEdgeCount += edges[index];
+      outsideCount += 1;
+    }
+  }
+
+  const insideMean = insideSum / Math.max(1, area);
+  const outsideMean = outsideSum / Math.max(1, outsideCount);
+
+  return {
+    areaPercent: area / Math.max(1, imageArea),
+    aspectRatio: rawRatio,
+    normalizedRatio,
+    rectangularity,
+    borderEdgeDensity: borderEdges / Math.max(1, borderPixels),
+    interiorDensity: interiorForeground / Math.max(1, interiorPixels),
+    contrastAgainstBackground: Math.abs(insideMean - outsideMean) / 255,
+    outsideEdgeDensity: outsideEdgeCount / Math.max(1, outsideCount),
+  };
+}
+
+function assessCandidate(
+  box: ComponentBox,
+  metrics: CandidateMetrics,
+  imageWidth: number,
+  imageHeight: number,
+  minAreaPercent: number,
+): CandidateAssessment {
   const imageArea = imageWidth * imageHeight;
   const area = box.width * box.height;
-  const areaPercent = area / Math.max(1, imageArea);
-  const rawRatio = box.width / Math.max(1, box.height);
-  const aspectRatio = rawRatio;
-  const normalizedRatio = rawRatio >= 1 ? rawRatio : 1 / Math.max(0.0001, rawRatio);
-  const density = box.pixels / Math.max(1, area);
+  const areaPercent = metrics.areaPercent;
+  const aspectRatio = metrics.aspectRatio;
+  const normalizedRatio = metrics.normalizedRatio;
+  const density = metrics.interiorDensity;
 
-  if (areaPercent < 0.008) {
-    return { accepted: false, reason: 'too_small', confidence: 0, aspectRatio, areaPercent };
+  if (areaPercent < minAreaPercent) {
+    return { accepted: false, reason: 'too_small', confidence: 0, aspectRatio, areaPercent, score: 0 };
   }
   if (areaPercent > 0.82) {
-    return { accepted: false, reason: 'too_large_background', confidence: 0, aspectRatio, areaPercent };
+    return { accepted: false, reason: 'too_large_background', confidence: 0, aspectRatio, areaPercent, score: 0 };
   }
   if (box.width < imageWidth * 0.08 || box.height < imageHeight * 0.06) {
-    return { accepted: false, reason: 'insufficient_dimensions', confidence: 0, aspectRatio, areaPercent };
+    return { accepted: false, reason: 'insufficient_dimensions', confidence: 0, aspectRatio, areaPercent, score: 0 };
   }
-  if (normalizedRatio < 1.0 || normalizedRatio > 3.3) {
-    return { accepted: false, reason: 'aspect_ratio_out_of_range', confidence: 0, aspectRatio, areaPercent };
+  if (normalizedRatio < MIN_CARD_RATIO || normalizedRatio > EXTREME_CARD_RATIO) {
+    return { accepted: false, reason: 'aspect_ratio_out_of_range', confidence: 0, aspectRatio, areaPercent, score: 0 };
   }
-  if (density < 0.006 || density > 0.7) {
-    return { accepted: false, reason: 'edge_density_out_of_range', confidence: 0, aspectRatio, areaPercent };
+  if (normalizedRatio > MAX_CARD_RATIO && getClosestCardRatioDistance(normalizedRatio) > 0.25) {
+    return { accepted: false, reason: 'extreme_aspect_ratio', confidence: 0, aspectRatio, areaPercent, score: 0 };
+  }
+  if (density < 0.03 || density > 0.95) {
+    return { accepted: false, reason: 'content_density_out_of_range', confidence: 0, aspectRatio, areaPercent, score: 0 };
+  }
+  if (metrics.contrastAgainstBackground < 0.035 && metrics.borderEdgeDensity < 0.03) {
+    return { accepted: false, reason: 'mostly_background', confidence: 0, aspectRatio, areaPercent, score: 0 };
   }
 
-  const areaScore = 1 - Math.min(1, Math.abs(areaPercent - 0.12) / 0.12);
-  const aspectScore = 1 - Math.min(1, Math.abs(normalizedRatio - 1.75) / 1.75);
-  const densityScore = 1 - Math.min(1, Math.abs(density - 0.14) / 0.14);
-  const confidence = clamp(0.35 + areaScore * 0.3 + aspectScore * 0.2 + densityScore * 0.2, 0.2, 0.99);
+  const areaScore = 1 - Math.min(1, Math.abs(areaPercent - 0.14) / 0.14);
+  const aspectDistance = getClosestCardRatioDistance(normalizedRatio);
+  const aspectScore = 1 - Math.min(1, aspectDistance / 0.7);
+  const rectangularityScore = 1 - Math.min(1, Math.abs(metrics.rectangularity - 0.62) / 0.62);
+  const borderScore = clamp(metrics.borderEdgeDensity / 0.2, 0, 1);
+  const interiorScore = 1 - Math.min(1, Math.abs(metrics.interiorDensity - 0.22) / 0.22);
+  const contrastScore = clamp(metrics.contrastAgainstBackground / 0.22, 0, 1);
+  const backgroundPenalty = (metrics.interiorDensity < 0.08 && metrics.contrastAgainstBackground < 0.05) ? 0.35 : 0;
+  const clutterPenalty = metrics.outsideEdgeDensity > 0.2 ? 0.08 : 0;
+
+  const score = clamp(
+    areaScore * 0.18
+      + aspectScore * 0.2
+      + rectangularityScore * 0.16
+      + borderScore * 0.16
+      + interiorScore * 0.14
+      + contrastScore * 0.16
+      - backgroundPenalty
+      - clutterPenalty,
+    0,
+    1,
+  );
+
+  if (score < 0.32) {
+    return { accepted: false, reason: 'low_card_score', confidence: score, aspectRatio, areaPercent, score };
+  }
+
+  const confidence = clamp(0.25 + score * 0.72, 0.2, 0.99);
 
   return {
     accepted: true,
@@ -503,7 +768,180 @@ function assessCandidate(box: ComponentBox, imageWidth: number, imageHeight: num
     confidence,
     aspectRatio,
     areaPercent,
+    score,
   };
+}
+
+function getVerticalProjection(binary: Uint8Array, width: number, box: ComponentBox): Uint16Array {
+  const projection = new Uint16Array(box.width);
+  const left = clamp(box.x, 0, width - 1);
+  const right = clamp(box.x + box.width - 1, left, width - 1);
+
+  for (let y = box.y; y < box.y + box.height; y += 1) {
+    const rowOffset = y * width;
+    for (let x = left; x <= right; x += 1) {
+      projection[x - left] += binary[rowOffset + x];
+    }
+  }
+
+  return projection;
+}
+
+function smoothProjection(values: Uint16Array): Uint16Array {
+  const smoothed = new Uint16Array(values.length);
+  for (let i = 0; i < values.length; i += 1) {
+    let sum = 0;
+    let count = 0;
+    for (let d = -2; d <= 2; d += 1) {
+      const idx = i + d;
+      if (idx < 0 || idx >= values.length) continue;
+      sum += values[idx];
+      count += 1;
+    }
+    smoothed[i] = Math.round(sum / Math.max(1, count));
+  }
+  return smoothed;
+}
+
+function splitWideBoxFromProjection(box: ComponentBox, projection: Uint16Array): ComponentBox[] {
+  const ratio = box.width / Math.max(1, box.height);
+  if (ratio < 2.4) return [box];
+
+  const smoothed = smoothProjection(projection);
+  const threshold = Math.max(2, Math.round(box.height * 0.04));
+  const minGap = Math.max(8, Math.round(box.width * 0.035));
+
+  const cutOffsets: number[] = [];
+  let gapStart = -1;
+  for (let i = 0; i < smoothed.length; i += 1) {
+    const isGap = smoothed[i] <= threshold;
+    if (isGap && gapStart < 0) {
+      gapStart = i;
+    }
+    if (!isGap && gapStart >= 0) {
+      const gapLen = i - gapStart;
+      if (gapLen >= minGap) {
+        cutOffsets.push(gapStart + Math.round(gapLen / 2));
+      }
+      gapStart = -1;
+    }
+  }
+
+  if (gapStart >= 0) {
+    const gapLen = smoothed.length - gapStart;
+    if (gapLen >= minGap) {
+      cutOffsets.push(gapStart + Math.round(gapLen / 2));
+    }
+  }
+
+  if (cutOffsets.length === 0) return [box];
+
+  const splitXs = [0, ...cutOffsets, smoothed.length - 1]
+    .map((offset) => clamp(offset, 0, smoothed.length - 1))
+    .sort((a, b) => a - b);
+
+  const children: ComponentBox[] = [];
+  for (let i = 0; i < splitXs.length - 1; i += 1) {
+    const startOffset = splitXs[i];
+    const endOffset = splitXs[i + 1];
+    const childWidth = Math.max(1, endOffset - startOffset);
+    if (childWidth < Math.round(box.height * 0.55)) continue;
+
+    children.push({
+      x: box.x + startOffset,
+      y: box.y,
+      width: childWidth,
+      height: box.height,
+      pixels: Math.round(childWidth * box.height * 0.55),
+    });
+  }
+
+  return children.length >= 2 ? children : [box];
+}
+
+function splitWideCandidate(
+  box: ComponentBox,
+  foreground: Uint8Array,
+  width: number,
+  height: number,
+): ComponentBox[] {
+  const splitSkeleton = splitWideBoxFromProjection(box, getVerticalProjection(foreground, width, box));
+  if (splitSkeleton.length <= 1) return [box];
+
+  const children: ComponentBox[] = [];
+  for (const skeleton of splitSkeleton) {
+    const childX = skeleton.x;
+    const childWidth = skeleton.width;
+
+    let minY = height;
+    let maxY = 0;
+    let pixels = 0;
+
+    for (let y = box.y; y < box.y + box.height; y += 1) {
+      const rowOffset = y * width;
+      for (let x = childX; x < childX + childWidth; x += 1) {
+        const index = rowOffset + x;
+        if (foreground[index] === 0) continue;
+        pixels += 1;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+    }
+
+    if (pixels === 0 || minY >= maxY) continue;
+
+    children.push({
+      x: childX,
+      y: minY,
+      width: childWidth,
+      height: maxY - minY + 1,
+      pixels,
+    });
+  }
+
+  return children.length >= 2 ? children : [box];
+}
+
+function suppressCandidates(candidates: DetectionCandidate[]): {
+  accepted: DetectionCandidate[];
+  suppressed: Array<{ candidate: DetectionCandidate; reason: string }>;
+} {
+  const sorted = [...candidates].sort((a, b) => (
+    b.assessment.score - a.assessment.score
+      || (b.box.width * b.box.height) - (a.box.width * a.box.height)
+  ));
+
+  const accepted: DetectionCandidate[] = [];
+  const suppressed: Array<{ candidate: DetectionCandidate; reason: string }> = [];
+
+  sorted.forEach((candidate) => {
+    let rejectReason: string | null = null;
+
+    for (const keeper of accepted) {
+      const inside = insideRatio(candidate.box, keeper.box);
+      const overlapSmall = overlapOverSmaller(candidate.box, keeper.box);
+      const iou = getIoU(candidate.box, keeper.box);
+
+      if (inside >= INSIDE_SUPPRESSION_THRESHOLD) {
+        rejectReason = 'inside_larger_candidate';
+        break;
+      }
+
+      if (overlapSmall >= OVERLAP_SUPPRESSION_THRESHOLD || iou > MERGE_IOU_THRESHOLD) {
+        rejectReason = 'overlap_smaller_suppressed';
+        break;
+      }
+    }
+
+    if (rejectReason) {
+      suppressed.push({ candidate, reason: rejectReason });
+      return;
+    }
+
+    accepted.push(candidate);
+  });
+
+  return { accepted, suppressed };
 }
 
 function buildDebugOverlay(
@@ -588,6 +1026,7 @@ export async function detectBusinessCardCrops(
   const hardMax = Math.max(recommendedMax, options.hardMaxCards ?? 12);
   const debugEnabled = Boolean(options.debug ?? import.meta.env.DEV);
   const showOverlay = Boolean(options.enableDebugOverlay ?? import.meta.env.DEV);
+  const minAreaPercent = clamp(options.minAreaPercent ?? DEFAULT_MIN_AREA_PERCENT, 0.02, 0.2);
   const warnings: string[] = [];
 
   const image = await loadImage(file);
@@ -613,50 +1052,120 @@ export async function detectBusinessCardCrops(
   workContext.drawImage(image, 0, 0, workWidth, workHeight);
 
   const gray = normalizeContrast(toGrayArray(workContext.getImageData(0, 0, workWidth, workHeight)));
-  const edges = closeBinary(edgeMap(gray, workWidth, workHeight), workWidth, workHeight);
-  const components = collectConnectedComponents(edges, workWidth, workHeight);
+  const denoisedGray = boxBlur(gray, workWidth, workHeight, 1, 1);
+  const foregroundMask = openBinary(adaptiveForegroundMask(denoisedGray, workWidth, workHeight), workWidth, workHeight);
+  const edges = closeBinary(edgeMap(denoisedGray, workWidth, workHeight), workWidth, workHeight);
 
-  const evaluations = components.map((box, index) => {
-    const bounds = componentToBounds(box, scale, image.naturalWidth, image.naturalHeight);
-    const assessment = assessCandidate(box, workWidth, workHeight);
+  const componentMinPixels = Math.max(80, Math.round(workWidth * workHeight * 0.0012));
+  const components = collectConnectedComponents(foregroundMask, workWidth, workHeight)
+    .filter((component) => component.pixels >= componentMinPixels)
+    .map((component) => ({
+      ...component,
+      x: clamp(component.x - 2, 0, workWidth - 1),
+      y: clamp(component.y - 2, 0, workHeight - 1),
+      width: clamp(component.width + 4, 1, workWidth),
+      height: clamp(component.height + 4, 1, workHeight),
+    }));
+
+  const mergedBoxes = mergeNearbyBoxes(components);
+
+  const baseCandidates = mergedBoxes.map((box, index): DetectionCandidate => {
+    const metrics = measureCandidateMetrics(box, denoisedGray, edges, foregroundMask, workWidth, workHeight);
+    const assessment = assessCandidate(box, metrics, workWidth, workHeight, minAreaPercent);
 
     return {
       index,
       box,
-      bounds,
+      bounds: componentToBounds(box, scale, image.naturalWidth, image.naturalHeight),
+      generatedBy: components.length === mergedBoxes.length ? 'component' : 'merge',
       assessment,
+      metrics,
     };
   });
 
-  const acceptedBoxes = evaluations
-    .filter((candidate) => candidate.assessment.accepted)
-    .map((candidate) => candidate.box);
+  const expandedCandidates: DetectionCandidate[] = [];
+  const splitRejections: Array<{ candidate: DetectionCandidate; reason: string }> = [];
 
-  const cleanedAccepted = sortReadingOrder(nonMaximumSuppression(mergeNearbyBoxes(acceptedBoxes), 0.4));
+  baseCandidates.forEach((candidate) => {
+    const children = splitWideCandidate(candidate.box, foregroundMask, workWidth, workHeight);
+    if (children.length <= 1) {
+      expandedCandidates.push(candidate);
+      return;
+    }
+
+    const splitChildren = children.map((child, childIndex): DetectionCandidate => {
+      const metrics = measureCandidateMetrics(child, denoisedGray, edges, foregroundMask, workWidth, workHeight);
+      const assessment = assessCandidate(child, metrics, workWidth, workHeight, minAreaPercent);
+      return {
+        index: candidate.index * 100 + childIndex,
+        box: child,
+        bounds: componentToBounds(child, scale, image.naturalWidth, image.naturalHeight),
+        generatedBy: 'split',
+        assessment,
+        metrics,
+      };
+    });
+
+    const validChildren = splitChildren.filter((child) => child.assessment.accepted);
+    if (validChildren.length >= 2) {
+      expandedCandidates.push(...splitChildren);
+      splitRejections.push({ candidate, reason: 'split_into_children' });
+      return;
+    }
+
+    expandedCandidates.push(candidate);
+  });
+
+  const prelimAccepted = expandedCandidates.filter((candidate) => candidate.assessment.accepted);
+  const prelimRejected = expandedCandidates
+    .filter((candidate) => !candidate.assessment.accepted)
+    .map((candidate) => ({ candidate, reason: candidate.assessment.reason }));
+
+  const suppression = suppressCandidates(prelimAccepted);
+  const cleanedAccepted = sortReadingOrder(nonMaximumSuppression(
+    suppression.accepted.map((candidate) => candidate.box),
+    0.35,
+  ));
   const selectedBoxes = cleanedAccepted.slice(0, hardMax);
 
   if (cleanedAccepted.length > hardMax) {
     warnings.push(`Detected ${cleanedAccepted.length} card-like regions; processing the first ${hardMax}.`);
   }
 
-  const selectedSet = new Set(selectedBoxes.map((box) => `${box.x}:${box.y}:${box.width}:${box.height}:${box.pixels}`));
-  const candidates: DetectionCandidateDebug[] = evaluations.map((evaluation) => {
-    const fingerprint = `${evaluation.box.x}:${evaluation.box.y}:${evaluation.box.width}:${evaluation.box.height}:${evaluation.box.pixels}`;
-    const accepted = evaluation.assessment.accepted && selectedSet.has(fingerprint);
-    const reason = accepted
-      ? 'accepted'
-      : (evaluation.assessment.accepted ? 'suppressed_or_merged' : evaluation.assessment.reason);
+  const selectedSet = new Set(selectedBoxes.map((box) => computeBoxSignature(box)));
 
-    return {
-      index: evaluation.index,
-      status: accepted ? 'accepted' : 'rejected',
-      reason,
-      bounds: evaluation.bounds,
-      aspectRatio: Number(evaluation.assessment.aspectRatio.toFixed(3)),
-      areaPercent: Number((evaluation.assessment.areaPercent * 100).toFixed(3)),
-      confidence: Number(evaluation.assessment.confidence.toFixed(3)),
-    };
-  });
+  const debugCandidatesSource: Array<{ candidate: DetectionCandidate; reason: string }> = [
+    ...prelimRejected,
+    ...suppression.suppressed,
+    ...splitRejections,
+    ...suppression.accepted.map((candidate) => ({
+      candidate,
+      reason: selectedSet.has(computeBoxSignature(candidate.box)) ? 'accepted' : 'suppressed_or_merged',
+    })),
+  ];
+
+  const candidateSeen = new Set<string>();
+  const candidates: DetectionCandidateDebug[] = debugCandidatesSource
+    .filter(({ candidate }) => {
+      const key = `${candidate.index}:${computeBoxSignature(candidate.box)}:${candidate.generatedBy}`;
+      if (candidateSeen.has(key)) return false;
+      candidateSeen.add(key);
+      return true;
+    })
+    .map(({ candidate, reason }) => {
+      const accepted = reason === 'accepted';
+      return {
+        index: candidate.index,
+        status: accepted ? 'accepted' : 'rejected',
+        reason,
+        generatedBy: candidate.generatedBy,
+        bounds: candidate.bounds,
+        aspectRatio: Number(candidate.assessment.aspectRatio.toFixed(3)),
+        areaPercent: Number((candidate.assessment.areaPercent * 100).toFixed(3)),
+        confidence: Number(candidate.assessment.confidence.toFixed(3)),
+        score: Number(candidate.assessment.score.toFixed(3)),
+      };
+    });
 
   const rejectionReasons: Record<string, number> = {};
   candidates
@@ -679,10 +1188,10 @@ export async function detectBusinessCardCrops(
       && candidate.bounds.y === bounds.y
       && candidate.bounds.width === bounds.width
       && candidate.bounds.height === bounds.height,
-    )?.confidence ?? 0.6;
+    )?.confidence ?? 0.58;
 
     const warningsForCrop: string[] = [];
-    if (normalizedRatio < 1.0 || normalizedRatio > 3.3) {
+    if (normalizedRatio < MIN_CARD_RATIO || normalizedRatio > MAX_CARD_RATIO) {
       warningsForCrop.push('Aspect ratio is unusual for a business card.');
     }
 
@@ -717,7 +1226,7 @@ export async function detectBusinessCardCrops(
     ? crops.reduce((sum, crop) => sum + crop.confidence, 0) / crops.length
     : 0;
 
-  if (crops.length > 0 && averageConfidence < 0.62) {
+  if (crops.length > 0 && averageConfidence < 0.58) {
     warnings.push('Some cards may not have been detected. Try fewer cards per photo or add manual crops.');
   }
 
@@ -728,6 +1237,8 @@ export async function detectBusinessCardCrops(
     sourceImageName: file.name,
     imageWidth: image.naturalWidth,
     imageHeight: image.naturalHeight,
+    preFilterCandidateCount: baseCandidates.length,
+    acceptedCandidateCount: suppression.accepted.length,
     detectedCardCount: crops.length,
     candidateCount: candidates.length,
     rejectedCandidateCount: rejectedForOverlay.length,
