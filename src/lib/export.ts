@@ -22,7 +22,13 @@ interface ExportPayload {
 
 function normalizeCellValue(value: unknown): string {
   if (value === null || value === undefined) return '';
-  return String(value);
+
+  // Keep each exported value on a single logical line so spreadsheet imports
+  // do not appear shifted by embedded OCR line breaks or tabs.
+  return String(value)
+    .replace(/[\r\n\t]+/g, ' ')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
 }
 
 function getExportPayload(

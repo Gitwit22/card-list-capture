@@ -1834,6 +1834,14 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
 
         {step === 'review' && (
           <div className="space-y-6">
+            {mode === 'multi-upload' && (
+              <div className="flex flex-wrap gap-2">
+                <Button type="button" variant="outline" size="sm" onClick={() => setStep('capture')}>
+                  Back to Upload More Photos
+                </Button>
+              </div>
+            )}
+
             <div className="rounded-lg border border-border bg-card p-3">
               <p className="text-sm text-foreground font-medium">Ready to export: {sessionCounts.ready} rows</p>
               <p className="text-xs text-muted-foreground mt-1">
