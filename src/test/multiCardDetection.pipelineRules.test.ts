@@ -101,11 +101,14 @@ describe('estimateBackground', () => {
   it('estimates the dominant border colour from a solid-colour image', () => {
     // 100×60 image where all border pixels are grey (128,128,128)
     const imageData = makeImageData(100, 60, [128, 128, 128]);
-    const model = multiCardDetectionTestUtils.estimateBackground(imageData, 100, 60);
-    expect(model.r).toBeCloseTo(128, 0);
-    expect(model.g).toBeCloseTo(128, 0);
-    expect(model.b).toBeCloseTo(128, 0);
-    expect(model.radius).toBeGreaterThan(0);
+    const gray = new Uint8Array(100 * 60).fill(128);
+    const textureMap = multiCardDetectionTestUtils.computeTextureMap(gray, 100, 60);
+    const edges = new Uint8Array(100 * 60);
+    const model = multiCardDetectionTestUtils.estimateSceneBackground(imageData, textureMap, edges, 100, 60);
+    expect(model.clusters.length).toBeGreaterThan(0);
+    expect(model.clusters[0].s).toBeLessThan(0.08);
+    expect(model.clusters[0].v).toBeCloseTo(0.5, 1);
+    expect(model.colorRadius).toBeGreaterThan(0);
   });
 
   it('estimates background near the border even when the centre is a card', () => {
@@ -116,9 +119,18 @@ describe('estimateBackground', () => {
       const isBorder = x < 8 || x >= W - 8 || y < 8 || y >= H - 8;
       return isBorder ? [200, 200, 200] : [40, 40, 40];
     });
-    const model = multiCardDetectionTestUtils.estimateBackground(imageData, W, H);
-    // Background mean should be closer to 200 than to 40
-    expect(model.r).toBeGreaterThan(150);
+    const gray = new Uint8Array(W * H).fill(0);
+    for (let y = 0; y < H; y += 1) {
+      const rowOffset = y * W;
+      for (let x = 0; x < W; x += 1) {
+        gray[rowOffset + x] = x < 8 || x >= W - 8 || y < 8 || y >= H - 8 ? 200 : 40;
+      }
+    }
+    const textureMap = multiCardDetectionTestUtils.computeTextureMap(gray, W, H);
+    const edges = new Uint8Array(W * H);
+    const model = multiCardDetectionTestUtils.estimateSceneBackground(imageData, textureMap, edges, W, H);
+    // Dominant cluster value should be closer to border brightness than card interior.
+    expect(model.clusters[0].v).toBeGreaterThan(0.58);
   });
 });
 
@@ -126,13 +138,23 @@ describe('estimateBackground', () => {
 
 describe('buildBackgroundMask', () => {
   it('marks pixels close to the background colour as background', () => {
-    const W = 10;
-    const H = 10;
+    // Use a large enough image so closeBinary (dilate+erode) only strips the
+    // outermost 1-2 px ring; interior pixels must all be marked background.
+    const W = 40;
+    const H = 40;
     const imageData = makeImageData(W, H, [200, 200, 200]);
-    const model = { r: 200, g: 200, b: 200, radius: 30 };
-    const mask = multiCardDetectionTestUtils.buildBackgroundMask(imageData, W, H, model);
-    // All pixels should be background
-    expect(Array.from(mask).every((v) => v === 1)).toBe(true);
+    const gray = new Uint8Array(W * H).fill(200);
+    const textureMap = multiCardDetectionTestUtils.computeTextureMap(gray, W, H);
+    const edges = new Uint8Array(W * H);
+    const model = multiCardDetectionTestUtils.estimateSceneBackground(imageData, textureMap, edges, W, H);
+    const mask = multiCardDetectionTestUtils.buildSceneBackgroundMask(imageData, textureMap, edges, W, H, model);
+    // Interior pixels (avoiding the outer 3-px morphological cleanup ring)
+    // must all be marked as scene background.
+    for (let y = 3; y < H - 3; y += 1) {
+      for (let x = 3; x < W - 3; x += 1) {
+        expect(mask[y * W + x]).toBe(1);
+      }
+    }
   });
 
   it('marks pixels far from the background colour as foreground', () => {
@@ -140,8 +162,15 @@ describe('buildBackgroundMask', () => {
     const H = 4;
     // Background model is grey; all pixels are bright red — far from grey
     const imageData = makeImageData(W, H, [255, 0, 0]);
-    const model = { r: 200, g: 200, b: 200, radius: 30 };
-    const mask = multiCardDetectionTestUtils.buildBackgroundMask(imageData, W, H, model);
+    const gray = new Uint8Array(W * H).fill(0);
+    const textureMap = multiCardDetectionTestUtils.computeTextureMap(gray, W, H);
+    const edges = new Uint8Array(W * H).fill(1);
+    const model = {
+      clusters: [{ h: 0, s: 0, v: 0.78, weight: 1, texture: 8 }],
+      colorRadius: 0.1,
+      textureRadius: 16,
+    };
+    const mask = multiCardDetectionTestUtils.buildSceneBackgroundMask(imageData, textureMap, edges, W, H, model);
     expect(Array.from(mask).every((v) => v === 0)).toBe(true);
   });
 });

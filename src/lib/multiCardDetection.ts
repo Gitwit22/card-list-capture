@@ -39,13 +39,25 @@ export interface DetectionDebugInfo {
   imageHeight: number;
   preFilterCandidateCount?: number;
   acceptedCandidateCount?: number;
+  contourCandidateCount?: number;
+  expandedCandidateCount?: number;
+  fallbackClusterCount?: number;
   detectedCardCount: number;
   candidateCount: number;
   rejectedCandidateCount: number;
+  sceneBackgroundCoverage?: number;
+  textureMapStats?: {
+    mean: number;
+    p90: number;
+    max: number;
+  };
   rejectionReasons: Record<string, number>;
   candidates: DetectionCandidateDebug[];
   overlayUrl?: string;
-  backgroundModel?: { r: number; g: number; b: number; radius: number };
+  sceneBackgroundModel?: {
+    clusterCount: number;
+    dominantClusters: Array<{ h: number; s: number; v: number; weight: number; texture: number }>;
+  };
 }
 
 export interface MultiCardDetectionResult {
@@ -62,7 +74,7 @@ export interface MultiCardDetectionOptions {
   minAreaPercent?: number;
 }
 
-type CandidateOrigin = 'component' | 'merge' | 'split' | 'manual';
+type CandidateOrigin = 'component' | 'merge' | 'split' | 'manual' | 'contour' | 'expanded' | 'cluster-fallback';
 
 interface ComponentBox {
   x: number;
@@ -89,6 +101,7 @@ interface CandidateMetrics {
   borderEdgeDensity: number;
   interiorDensity: number;
   contrastAgainstBackground: number;
+  localBackgroundContrast: number;
   outsideEdgeDensity: number;
 }
 
@@ -101,11 +114,21 @@ interface DetectionCandidate {
   metrics: CandidateMetrics;
 }
 
-interface BackgroundModel {
-  r: number;
-  g: number;
-  b: number;
-  radius: number;
+interface HSVColor {
+  h: number;
+  s: number;
+  v: number;
+}
+
+interface SceneBackgroundCluster extends HSVColor {
+  weight: number;
+  texture: number;
+}
+
+interface SceneBackgroundModel {
+  clusters: SceneBackgroundCluster[];
+  colorRadius: number;
+  textureRadius: number;
 }
 
 const MAX_EDGE_DIMENSION = 1400;
@@ -653,98 +676,258 @@ export const multiCardDetectionTestUtils = {
   overlapOverSmaller,
   insideRatio,
   splitWideBoxFromProjection,
-  estimateBackground,
-  buildBackgroundMask,
+  estimateSceneBackground,
+  buildSceneBackgroundMask,
+  estimateBackground: estimateSceneBackground,
+  buildBackgroundMask: buildSceneBackgroundMask,
+  computeTextureMap,
   splitBoxByBackgroundGaps,
   findBackgroundSplitBands,
   hasBackgroundGapBetween,
 };
+export const multiCardDetectionPhaseUtils = {
+  detectRectangularContours,
+  expandCandidateToFullCard,
+  shouldAttemptExpansion,
+  clusterRejectedComponents,
+};
 
 // ─── Background-aware segmentation helpers ──────────────────────────────────
 
-function estimateBackground(
-  imageData: ImageData,
-  width: number,
-  height: number,
-): BackgroundModel {
-  const borderDepth = Math.max(8, Math.round(Math.min(width, height) * 0.05));
-  const data = imageData.data;
-  let sumR = 0;
-  let sumG = 0;
-  let sumB = 0;
-  let count = 0;
+function rgbToHsv(r: number, g: number, b: number): HSVColor {
+  const rn = r / 255;
+  const gn = g / 255;
+  const bn = b / 255;
+  const max = Math.max(rn, gn, bn);
+  const min = Math.min(rn, gn, bn);
+  const delta = max - min;
 
-  function sample(x: number, y: number): void {
-    const idx = (y * width + x) * 4;
-    sumR += data[idx];
-    sumG += data[idx + 1];
-    sumB += data[idx + 2];
-    count += 1;
+  let h = 0;
+  if (delta !== 0) {
+    if (max === rn) h = ((gn - bn) / delta) % 6;
+    else if (max === gn) h = (bn - rn) / delta + 2;
+    else h = (rn - gn) / delta + 4;
+    h = (h * 60 + 360) % 360;
   }
 
-  for (let y = 0; y < borderDepth; y += 1) {
-    for (let x = 0; x < width; x += 1) sample(x, y);
-  }
-  for (let y = height - borderDepth; y < height; y += 1) {
-    for (let x = 0; x < width; x += 1) sample(x, y);
-  }
-  for (let y = borderDepth; y < height - borderDepth; y += 1) {
-    for (let x = 0; x < borderDepth; x += 1) sample(x, y);
-    for (let x = width - borderDepth; x < width; x += 1) sample(x, y);
-  }
-
-  if (count === 0) return { r: 200, g: 200, b: 200, radius: 40 };
-
-  const meanR = sumR / count;
-  const meanG = sumG / count;
-  const meanB = sumB / count;
-
-  // RMSD over all three channels to estimate background spread (texture/shadows)
-  let sumVar = 0;
-  function addVar(x: number, y: number): void {
-    const idx = (y * width + x) * 4;
-    const dr = data[idx] - meanR;
-    const dg = data[idx + 1] - meanG;
-    const db = data[idx + 2] - meanB;
-    sumVar += dr * dr + dg * dg + db * db;
-  }
-  for (let y = 0; y < borderDepth; y += 1) {
-    for (let x = 0; x < width; x += 1) addVar(x, y);
-  }
-  for (let y = height - borderDepth; y < height; y += 1) {
-    for (let x = 0; x < width; x += 1) addVar(x, y);
-  }
-  for (let y = borderDepth; y < height - borderDepth; y += 1) {
-    for (let x = 0; x < borderDepth; x += 1) addVar(x, y);
-    for (let x = width - borderDepth; x < width; x += 1) addVar(x, y);
-  }
-
-  const rmsd = Math.sqrt(sumVar / (3 * Math.max(1, count)));
-  // Radius covers natural background variation (shadows, texture, gradient)
-  const radius = clamp(Math.round(rmsd * 2.2 + 25), 22, 90);
-
-  return { r: meanR, g: meanG, b: meanB, radius };
+  const s = max === 0 ? 0 : delta / max;
+  const v = max;
+  return { h, s, v };
 }
 
-function buildBackgroundMask(
+function hsvDistance(a: HSVColor, b: HSVColor): number {
+  const hueDelta = Math.abs(a.h - b.h);
+  const hue = Math.min(hueDelta, 360 - hueDelta) / 180;
+  const sat = Math.abs(a.s - b.s);
+  const val = Math.abs(a.v - b.v);
+  return Math.sqrt(hue * hue * 0.45 + sat * sat * 0.3 + val * val * 0.25);
+}
+
+function computeTextureMap(gray: Uint8Array, width: number, height: number): Uint8Array {
+  const texture = new Uint8Array(gray.length);
+  for (let y = 1; y < height - 1; y += 1) {
+    const rowOffset = y * width;
+    for (let x = 1; x < width - 1; x += 1) {
+      const idx = rowOffset + x;
+      const center = gray[idx];
+      const meanNeighbors = (
+        gray[idx - 1]
+        + gray[idx + 1]
+        + gray[idx - width]
+        + gray[idx + width]
+        + gray[idx - width - 1]
+        + gray[idx - width + 1]
+        + gray[idx + width - 1]
+        + gray[idx + width + 1]
+      ) / 8;
+      texture[idx] = clamp(Math.round(Math.abs(center - meanNeighbors) * 2.2), 0, 255);
+    }
+  }
+  return texture;
+}
+
+function estimateSceneBackground(
   imageData: ImageData,
+  textureMap: Uint8Array,
+  edgeMask: Uint8Array,
   width: number,
   height: number,
-  model: BackgroundModel,
-): Uint8Array {
-  const mask = new Uint8Array(width * height);
+): SceneBackgroundModel {
   const data = imageData.data;
-  const { r: br, g: bg, b: bb, radius } = model;
+  const borderDepth = Math.max(8, Math.round(Math.min(width, height) * 0.05));
+  const binStats = new Map<string, { count: number; sumH: number; sumS: number; sumV: number; sumTexture: number }>();
 
-  for (let i = 0, j = 0; i < data.length; i += 4, j += 1) {
-    // Chebyshev distance in RGB space — fast and handles colored backgrounds
-    const dr = Math.abs(data[i] - br);
-    const dg = Math.abs(data[i + 1] - bg);
-    const db = Math.abs(data[i + 2] - bb);
-    mask[j] = dr <= radius && dg <= radius && db <= radius ? 1 : 0;
+  function addSample(x: number, y: number): void {
+    if (x < 0 || x >= width || y < 0 || y >= height) return;
+    const idx = y * width + x;
+    const px = idx * 4;
+    const hsv = rgbToHsv(data[px], data[px + 1], data[px + 2]);
+    const texture = textureMap[idx];
+    const edge = edgeMask[idx];
+
+    // Prefer low-detail open-area pixels while still allowing mild texture.
+    const weight = clamp(1 - texture / 210 - edge * 0.25, 0.1, 1);
+    const hBin = Math.round(hsv.h / 20);
+    const sBin = Math.round(hsv.s * 8);
+    const vBin = Math.round(hsv.v * 8);
+    const key = `${hBin}:${sBin}:${vBin}`;
+    const bucket = binStats.get(key) ?? { count: 0, sumH: 0, sumS: 0, sumV: 0, sumTexture: 0 };
+
+    bucket.count += weight;
+    bucket.sumH += hsv.h * weight;
+    bucket.sumS += hsv.s * weight;
+    bucket.sumV += hsv.v * weight;
+    bucket.sumTexture += texture * weight;
+    binStats.set(key, bucket);
   }
 
-  return mask;
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      if (x < borderDepth || x >= width - borderDepth || y < borderDepth || y >= height - borderDepth) {
+        addSample(x, y);
+      }
+    }
+  }
+
+  // Also sample interior open regions on a coarse grid so border-touching cards
+  // do not dominate the model.
+  const stride = Math.max(3, Math.round(Math.min(width, height) * 0.015));
+  for (let y = borderDepth; y < height - borderDepth; y += stride) {
+    for (let x = borderDepth; x < width - borderDepth; x += stride) {
+      const idx = y * width + x;
+      if (textureMap[idx] > 52 || edgeMask[idx]) continue;
+      addSample(x, y);
+    }
+  }
+
+  const entries = [...binStats.values()].sort((a, b) => b.count - a.count);
+  const totalWeight = entries.reduce((sum, entry) => sum + entry.count, 0);
+  const clusters: SceneBackgroundCluster[] = entries
+    .slice(0, 4)
+    .map((entry) => ({
+      h: entry.sumH / Math.max(0.0001, entry.count),
+      s: entry.sumS / Math.max(0.0001, entry.count),
+      v: entry.sumV / Math.max(0.0001, entry.count),
+      texture: entry.sumTexture / Math.max(0.0001, entry.count),
+      weight: entry.count / Math.max(0.0001, totalWeight),
+    }));
+
+  if (clusters.length === 0) {
+    clusters.push({ h: 0, s: 0, v: 0.78, texture: 10, weight: 1 });
+  }
+
+  const avgTexture = clusters.reduce((sum, cluster) => sum + cluster.texture * cluster.weight, 0);
+  return {
+    clusters,
+    colorRadius: clamp(0.18 + avgTexture / 520, 0.14, 0.34),
+    textureRadius: clamp(Math.round(avgTexture * 1.8 + 22), 18, 86),
+  };
+}
+
+function buildSceneBackgroundMask(
+  imageData: ImageData,
+  textureMap: Uint8Array,
+  edgeMask: Uint8Array,
+  width: number,
+  height: number,
+  model: SceneBackgroundModel,
+): Uint8Array {
+  const data = imageData.data;
+  const candidate = new Uint8Array(width * height);
+
+  for (let y = 0; y < height; y += 1) {
+    const rowOffset = y * width;
+    for (let x = 0; x < width; x += 1) {
+      const idx = rowOffset + x;
+      const px = idx * 4;
+      const hsv = rgbToHsv(data[px], data[px + 1], data[px + 2]);
+      const texture = textureMap[idx];
+
+      let minColorDistance = Number.POSITIVE_INFINITY;
+      let nearest: SceneBackgroundCluster | null = null;
+
+      for (const cluster of model.clusters) {
+        const dist = hsvDistance(hsv, cluster);
+        if (dist < minColorDistance) {
+          minColorDistance = dist;
+          nearest = cluster;
+        }
+      }
+
+      const textureDelta = nearest ? Math.abs(texture - nearest.texture) : texture;
+      const colorThreshold = model.colorRadius + clamp((nearest?.weight ?? 0.2) * 0.08, 0.01, 0.08);
+      const textureThreshold = model.textureRadius;
+      const isBackgroundLike = minColorDistance <= colorThreshold
+        && textureDelta <= textureThreshold
+        && edgeMask[idx] === 0;
+
+      candidate[idx] = isBackgroundLike ? 1 : 0;
+    }
+  }
+
+  // Keep only candidate regions that are connected to borders or are very large
+  // open regions. This avoids classifying blank card interiors as scene background.
+  const visited = new Uint8Array(candidate.length);
+  const queue = new Int32Array(candidate.length);
+  const mask = new Uint8Array(candidate.length);
+  const minOpenRegion = Math.max(120, Math.round(width * height * 0.012));
+
+  function flood(start: number): number[] {
+    let head = 0;
+    let tail = 0;
+    queue[tail++] = start;
+    visited[start] = 1;
+    const region: number[] = [];
+
+    while (head < tail) {
+      const idx = queue[head++];
+      region.push(idx);
+      const y = Math.floor(idx / width);
+      const x = idx - y * width;
+
+      const neighbors = [
+        idx - 1,
+        idx + 1,
+        idx - width,
+        idx + width,
+      ];
+
+      for (const next of neighbors) {
+        if (next < 0 || next >= candidate.length) continue;
+        const ny = Math.floor(next / width);
+        const nx = next - ny * width;
+        if (Math.abs(nx - x) + Math.abs(ny - y) !== 1) continue;
+        if (visited[next] || candidate[next] === 0) continue;
+        visited[next] = 1;
+        queue[tail++] = next;
+      }
+    }
+
+    return region;
+  }
+
+  for (let i = 0; i < candidate.length; i += 1) {
+    if (!candidate[i] || visited[i]) continue;
+    const region = flood(i);
+    let touchesBorder = false;
+
+    for (const idx of region) {
+      const y = Math.floor(idx / width);
+      const x = idx - y * width;
+      if (x === 0 || y === 0 || x === width - 1 || y === height - 1) {
+        touchesBorder = true;
+        break;
+      }
+    }
+
+    if (touchesBorder || region.length >= minOpenRegion) {
+      for (const idx of region) {
+        mask[idx] = 1;
+      }
+    }
+  }
+
+  return closeBinary(mask, width, height);
 }
 
 function getColumnBackgroundProjection(
@@ -1048,6 +1231,7 @@ function measureCandidateMetrics(
 
   const insideMean = insideSum / Math.max(1, area);
   const outsideMean = outsideSum / Math.max(1, outsideCount);
+  const localBackgroundContrast = Math.abs(insideMean - outsideMean) / 255;
 
   return {
     areaPercent: area / Math.max(1, imageArea),
@@ -1056,7 +1240,8 @@ function measureCandidateMetrics(
     rectangularity,
     borderEdgeDensity: borderEdges / Math.max(1, borderPixels),
     interiorDensity: interiorForeground / Math.max(1, interiorPixels),
-    contrastAgainstBackground: Math.abs(insideMean - outsideMean) / 255,
+    contrastAgainstBackground: localBackgroundContrast,
+    localBackgroundContrast,
     outsideEdgeDensity: outsideEdgeCount / Math.max(1, outsideCount),
   };
 }
@@ -1074,6 +1259,7 @@ function assessCandidate(
   const aspectRatio = metrics.aspectRatio;
   const normalizedRatio = metrics.normalizedRatio;
   const density = metrics.interiorDensity;
+  const localBgContrast = metrics.localBackgroundContrast;
 
   if (areaPercent < minAreaPercent) {
     return { accepted: false, reason: 'too_small', confidence: 0, aspectRatio, areaPercent, score: 0 };
@@ -1093,8 +1279,11 @@ function assessCandidate(
   if (density < 0.03 || density > 0.95) {
     return { accepted: false, reason: 'content_density_out_of_range', confidence: 0, aspectRatio, areaPercent, score: 0 };
   }
-  if (metrics.contrastAgainstBackground < 0.035 && metrics.borderEdgeDensity < 0.03) {
+  if (localBgContrast < 0.03 && metrics.borderEdgeDensity < 0.03) {
     return { accepted: false, reason: 'mostly_background', confidence: 0, aspectRatio, areaPercent, score: 0 };
+  }
+  if (localBgContrast < 0.022 && density < 0.11) {
+    return { accepted: false, reason: 'local_bg_too_similar', confidence: 0, aspectRatio, areaPercent, score: 0 };
   }
 
   const areaScore = 1 - Math.min(1, Math.abs(areaPercent - 0.14) / 0.14);
@@ -1103,8 +1292,8 @@ function assessCandidate(
   const rectangularityScore = 1 - Math.min(1, Math.abs(metrics.rectangularity - 0.62) / 0.62);
   const borderScore = clamp(metrics.borderEdgeDensity / 0.2, 0, 1);
   const interiorScore = 1 - Math.min(1, Math.abs(metrics.interiorDensity - 0.22) / 0.22);
-  const contrastScore = clamp(metrics.contrastAgainstBackground / 0.22, 0, 1);
-  const backgroundPenalty = (metrics.interiorDensity < 0.08 && metrics.contrastAgainstBackground < 0.05) ? 0.35 : 0;
+  const contrastScore = clamp(localBgContrast / 0.22, 0, 1);
+  const backgroundPenalty = (metrics.interiorDensity < 0.08 && localBgContrast < 0.05) ? 0.35 : 0;
   const clutterPenalty = metrics.outsideEdgeDensity > 0.2 ? 0.08 : 0;
 
   const score = clamp(
@@ -1308,9 +1497,207 @@ function suppressCandidates(candidates: DetectionCandidate[]): {
   return { accepted, suppressed };
 }
 
+// ─── Phase 2: Rectangle contour detection ────────────────────────────────────
+// Find rectangular card boundaries by closing the edge map and collecting
+// connected components within the closed edge layer. This path detects cards
+// based on their physical outline/shadow rather than their printed content,
+// complementing the existing foreground-content connected-component path.
+
+function detectRectangularContours(
+  edges: Uint8Array,
+  sceneBackgroundMask: Uint8Array,
+  width: number,
+  height: number,
+  minAreaPercent: number,
+): ComponentBox[] {
+  const imageArea = width * height;
+
+  // Close edges more aggressively to connect broken card outlines
+  // (shadows, corners, low-contrast borders all produce broken lines).
+  const closedEdges = dilate(edges, width, height, 3);
+
+  const rawComponents = collectConnectedComponents(closedEdges, width, height);
+  const candidates: ComponentBox[] = [];
+
+  for (const comp of rawComponents) {
+    const area = comp.width * comp.height;
+    const areaPercent = area / imageArea;
+
+    if (areaPercent < minAreaPercent * 0.4) continue;
+    if (areaPercent > 0.9) continue;
+    if (comp.width < width * 0.05 || comp.height < height * 0.04) continue;
+
+    const rawRatio = comp.width / Math.max(1, comp.height);
+    const normalizedRatio = rawRatio >= 1 ? rawRatio : 1 / Math.max(0.0001, rawRatio);
+    if (normalizedRatio < MIN_CARD_RATIO - 0.15 || normalizedRatio > EXTREME_CARD_RATIO + 0.2) continue;
+
+    // Require edge coverage on the bounding box perimeter — distinguishes
+    // real card outlines from scattered interior text/print noise.
+    const borderDepth = Math.max(2, Math.round(Math.min(comp.width, comp.height) * 0.07));
+    let borderEdges = 0;
+    let borderPixels = 0;
+    const left = clamp(comp.x, 0, width - 1);
+    const top = clamp(comp.y, 0, height - 1);
+    const right = clamp(comp.x + comp.width - 1, left, width - 1);
+    const bottom = clamp(comp.y + comp.height - 1, top, height - 1);
+
+    for (let y = top; y <= bottom; y += 1) {
+      const rowOffset = y * width;
+      for (let x = left; x <= right; x += 1) {
+        const onBorder = (
+          x - left < borderDepth
+          || right - x < borderDepth
+          || y - top < borderDepth
+          || bottom - y < borderDepth
+        );
+        if (onBorder) {
+          borderPixels += 1;
+          borderEdges += edges[rowOffset + x];
+        }
+      }
+    }
+
+    const edgeDensity = borderEdges / Math.max(1, borderPixels);
+    if (edgeDensity < 0.025) continue;
+
+    candidates.push({ x: left, y: top, width: right - left + 1, height: bottom - top + 1, pixels: comp.pixels });
+  }
+
+  return candidates;
+}
+
+// ─── Phase 4: Candidate expansion to full card ──────────────────────────────
+// Expand a partial candidate outward until its boundary hits scene background.
+// This turns partial text/logo detections into full card crops.
+
+function expandCandidateToFullCard(
+  box: ComponentBox,
+  sceneBackgroundMask: Uint8Array,
+  width: number,
+  height: number,
+): ComponentBox {
+  const MAX_EXPAND_FRACTION = 0.30;
+  const BG_STOP_THRESHOLD = 0.55;
+
+  let top = box.y;
+  let bottom = box.y + box.height - 1;
+  let left = box.x;
+  let right = box.x + box.width - 1;
+
+  const maxExpandH = Math.round(box.height * MAX_EXPAND_FRACTION);
+  const maxExpandW = Math.round(box.width * MAX_EXPAND_FRACTION);
+
+  function rowBgFraction(y: number, x1: number, x2: number): number {
+    if (y < 0 || y >= height) return 1;
+    let bg = 0;
+    let total = 0;
+    const rowOffset = y * width;
+    for (let x = Math.max(0, x1); x <= Math.min(width - 1, x2); x += 1) {
+      total += 1;
+      bg += sceneBackgroundMask[rowOffset + x];
+    }
+    return total === 0 ? 1 : bg / total;
+  }
+
+  function colBgFraction(x: number, y1: number, y2: number): number {
+    if (x < 0 || x >= width) return 1;
+    let bg = 0;
+    let total = 0;
+    for (let y = Math.max(0, y1); y <= Math.min(height - 1, y2); y += 1) {
+      total += 1;
+      bg += sceneBackgroundMask[y * width + x];
+    }
+    return total === 0 ? 1 : bg / total;
+  }
+
+  for (let i = 0; i < maxExpandH; i += 1) {
+    if (top <= 0) break;
+    if (rowBgFraction(top - 1, left, right) >= BG_STOP_THRESHOLD) break;
+    top -= 1;
+  }
+
+  for (let i = 0; i < maxExpandH; i += 1) {
+    if (bottom >= height - 1) break;
+    if (rowBgFraction(bottom + 1, left, right) >= BG_STOP_THRESHOLD) break;
+    bottom += 1;
+  }
+
+  for (let i = 0; i < maxExpandW; i += 1) {
+    if (left <= 0) break;
+    if (colBgFraction(left - 1, top, bottom) >= BG_STOP_THRESHOLD) break;
+    left -= 1;
+  }
+
+  for (let i = 0; i < maxExpandW; i += 1) {
+    if (right >= width - 1) break;
+    if (colBgFraction(right + 1, top, bottom) >= BG_STOP_THRESHOLD) break;
+    right += 1;
+  }
+
+  return {
+    x: left,
+    y: top,
+    width: right - left + 1,
+    height: bottom - top + 1,
+    pixels: box.pixels,
+  };
+}
+
+function shouldAttemptExpansion(
+  box: ComponentBox,
+  metrics: CandidateMetrics,
+  workWidth: number,
+  workHeight: number,
+): boolean {
+  const areaPercent = (box.width * box.height) / Math.max(1, workWidth * workHeight);
+  const hasEdgeEvidence = metrics.borderEdgeDensity > 0.03;
+  // Only expand small candidates that already have some boundary evidence —
+  // these are likely partial crops of a larger card.
+  return areaPercent < 0.15 && hasEdgeEvidence;
+}
+
+// ─── Phase 7: Fallback clustering for missed cards ───────────────────────────
+// When too few cards are found but many small components were rejected, group
+// those components spatially and attempt to expand each cluster into a card.
+
+function clusterRejectedComponents(
+  rejectedBoxes: ComponentBox[],
+  width: number,
+  height: number,
+): ComponentBox[][] {
+  if (rejectedBoxes.length === 0) return [];
+
+  const clusterGap = Math.max(20, Math.round(Math.min(width, height) * 0.055));
+  const remaining = [...rejectedBoxes];
+  const clusters: ComponentBox[][] = [];
+
+  while (remaining.length > 0) {
+    const seed = remaining.shift();
+    if (!seed) break;
+    const cluster = [seed];
+    let added = true;
+
+    while (added) {
+      added = false;
+      for (let i = remaining.length - 1; i >= 0; i -= 1) {
+        const box = remaining[i];
+        if (cluster.some((member) => getEdgeDistance(member, box) <= clusterGap)) {
+          cluster.push(box);
+          remaining.splice(i, 1);
+          added = true;
+        }
+      }
+    }
+
+    clusters.push(cluster);
+  }
+
+  return clusters;
+}
+
 function buildDebugOverlay(
   image: HTMLImageElement,
-  accepted: Array<{ bounds: DetectionBounds; cropIndex: number }>,
+  accepted: Array<{ bounds: DetectionBounds; cropIndex: number; generatedBy?: CandidateOrigin }>,
   rejected: DetectionCandidateDebug[],
 ): string {
   const canvas = createCanvas(image.naturalWidth, image.naturalHeight);
@@ -1321,22 +1708,37 @@ function buildDebugOverlay(
   context.lineWidth = Math.max(2, Math.round(Math.min(image.naturalWidth, image.naturalHeight) / 400));
   context.font = `${Math.max(14, Math.round(Math.min(image.naturalWidth, image.naturalHeight) / 45))}px sans-serif`;
 
+  function styleForOrigin(origin?: CandidateOrigin): { stroke: string; fill: string; label: string } {
+    if (origin === 'contour') {
+      return { stroke: 'rgba(249,115,22,0.9)', fill: 'rgba(249,115,22,0.2)', label: 'CT' };
+    }
+    if (origin === 'expanded') {
+      return { stroke: 'rgba(14,165,233,0.9)', fill: 'rgba(14,165,233,0.2)', label: 'EX' };
+    }
+    if (origin === 'cluster-fallback') {
+      return { stroke: 'rgba(168,85,247,0.9)', fill: 'rgba(168,85,247,0.2)', label: 'CF' };
+    }
+    return { stroke: 'rgba(34,197,94,0.95)', fill: 'rgba(34,197,94,0.15)', label: 'CC' };
+  }
+
   rejected.forEach((candidate, index) => {
-    context.strokeStyle = 'rgba(239,68,68,0.85)';
-    context.fillStyle = 'rgba(239,68,68,0.18)';
+    const originStyle = styleForOrigin(candidate.generatedBy);
+    context.strokeStyle = originStyle.stroke;
+    context.fillStyle = originStyle.fill;
     context.fillRect(candidate.bounds.x, candidate.bounds.y, candidate.bounds.width, candidate.bounds.height);
     context.strokeRect(candidate.bounds.x, candidate.bounds.y, candidate.bounds.width, candidate.bounds.height);
     context.fillStyle = 'rgba(127,29,29,0.95)';
-    context.fillText(`R${index + 1}`, candidate.bounds.x + 4, Math.max(16, candidate.bounds.y - 6));
+    context.fillText(`${originStyle.label}-R${index + 1}`, candidate.bounds.x + 4, Math.max(16, candidate.bounds.y - 6));
   });
 
   accepted.forEach((candidate) => {
-    context.strokeStyle = 'rgba(34,197,94,0.95)';
-    context.fillStyle = 'rgba(34,197,94,0.15)';
+    const originStyle = styleForOrigin(candidate.generatedBy);
+    context.strokeStyle = originStyle.stroke;
+    context.fillStyle = originStyle.fill;
     context.fillRect(candidate.bounds.x, candidate.bounds.y, candidate.bounds.width, candidate.bounds.height);
     context.strokeRect(candidate.bounds.x, candidate.bounds.y, candidate.bounds.width, candidate.bounds.height);
     context.fillStyle = 'rgba(20,83,45,0.95)';
-    context.fillText(`#${candidate.cropIndex}`, candidate.bounds.x + 4, Math.max(16, candidate.bounds.y - 6));
+    context.fillText(`${originStyle.label}-#${candidate.cropIndex}`, candidate.bounds.x + 4, Math.max(16, candidate.bounds.y - 6));
   });
 
   return canvas.toDataURL('image/png');
@@ -1420,15 +1822,20 @@ export async function detectBusinessCardCrops(
   const denoisedGray = boxBlur(gray, workWidth, workHeight, 1, 1);
   const foregroundMask = openBinary(adaptiveForegroundMask(denoisedGray, workWidth, workHeight), workWidth, workHeight);
   const edges = closeBinary(edgeMap(denoisedGray, workWidth, workHeight), workWidth, workHeight);
+  const textureMap = computeTextureMap(denoisedGray, workWidth, workHeight);
 
-  // ── Background-aware segmentation ─────────────────────────────────────────
-  // Sample image borders to estimate the table/desk background color, then
-  // build a binary mask marking pixels that belong to the background plane.
-  // This mask is used as a first-class signal for: merge guards (don't merge
-  // card components separated by background) and split detection (find rows/
-  // columns dominated by background to locate card boundaries).
-  const backgroundModel = estimateBackground(workImageData, workWidth, workHeight);
-  const backgroundMask = buildBackgroundMask(workImageData, workWidth, workHeight, backgroundModel);
+  // ── Scene-background segmentation ────────────────────────────────────────
+  // Build a dynamic model of the scene around cards using border samples and
+  // interior open regions, then mark high-confidence scene background.
+  const sceneBackgroundModel = estimateSceneBackground(workImageData, textureMap, edges, workWidth, workHeight);
+  const sceneBackgroundMask = buildSceneBackgroundMask(
+    workImageData,
+    textureMap,
+    edges,
+    workWidth,
+    workHeight,
+    sceneBackgroundModel,
+  );
 
   const componentMinPixels = Math.max(80, Math.round(workWidth * workHeight * 0.0012));
   const components = collectConnectedComponents(foregroundMask, workWidth, workHeight)
@@ -1441,24 +1848,51 @@ export async function detectBusinessCardCrops(
       height: clamp(component.height + 4, 1, workHeight),
     }));
 
-  // Pass background mask so that components separated by visible background
+  // Pass scene background mask so components separated by visible background
   // are never merged into a single candidate.
-  const mergedBoxes = mergeNearbyBoxes(components, backgroundMask, workWidth);
+  const mergedBoxes = mergeNearbyBoxes(components, sceneBackgroundMask, workWidth);
 
-  const baseCandidates = mergedBoxes.map((box, index): DetectionCandidate => {
+  // ── Phase 2: Merge component path with contour detection path ─────────────
+  // Component path finds areas with printed content; contour path finds card
+  // outlines via edge closing. Cards missed by one path are often found by
+  // the other. Deduplicate by IoU before scoring.
+  const contourBoxes = detectRectangularContours(edges, sceneBackgroundMask, workWidth, workHeight, minAreaPercent);
+
+  const baseCandidates: DetectionCandidate[] = [];
+  const seenBoxSignatures = new Set<string>();
+
+  mergedBoxes.forEach((box, index) => {
+    const sig = computeBoxSignature(box);
+    if (seenBoxSignatures.has(sig)) return;
+    seenBoxSignatures.add(sig);
     const metrics = measureCandidateMetrics(box, denoisedGray, edges, foregroundMask, workWidth, workHeight);
     const assessment = assessCandidate(box, metrics, workWidth, workHeight, minAreaPercent);
-
-    return {
+    baseCandidates.push({
       index,
       box,
       bounds: componentToBounds(box, scale, image.naturalWidth, image.naturalHeight),
       generatedBy: components.length === mergedBoxes.length ? 'component' : 'merge',
       assessment,
       metrics,
-    };
+    });
   });
 
+  contourBoxes.forEach((box, idx) => {
+    const isDuplicate = baseCandidates.some((existing) => getIoU(existing.box, box) > 0.45);
+    if (isDuplicate) return;
+    const metrics = measureCandidateMetrics(box, denoisedGray, edges, foregroundMask, workWidth, workHeight);
+    const assessment = assessCandidate(box, metrics, workWidth, workHeight, minAreaPercent);
+    baseCandidates.push({
+      index: mergedBoxes.length + idx,
+      box,
+      bounds: componentToBounds(box, scale, image.naturalWidth, image.naturalHeight),
+      generatedBy: 'contour',
+      assessment,
+      metrics,
+    });
+  });
+
+  // ── Split phase (unchanged logic, now operates on unified candidate set) ──
   const expandedCandidates: DetectionCandidate[] = [];
   const splitRejections: Array<{ candidate: DetectionCandidate; reason: string }> = [];
 
@@ -1467,7 +1901,7 @@ export async function detectBusinessCardCrops(
     // cards). Falls back to no-split automatically if no background bands found.
     const children = splitBoxByBackgroundGaps(
       candidate.box,
-      backgroundMask,
+      sceneBackgroundMask,
       foregroundMask,
       workWidth,
       workHeight,
@@ -1522,10 +1956,94 @@ export async function detectBusinessCardCrops(
     expandedCandidates.push(candidate);
   });
 
-  const prelimAccepted = expandedCandidates.filter((candidate) => candidate.assessment.accepted);
-  const prelimRejected = expandedCandidates
+  // ── Phase 4: Candidate expansion ─────────────────────────────────────────
+  // Grow small partial detections (text/logo fragment) outward to the full card
+  // boundary. Expansion stops at scene background, not at blank card interiors.
+  const expansionRejections: Array<{ candidate: DetectionCandidate; reason: string }> = [];
+  const postExpansionCandidates = expandedCandidates.map((candidate): DetectionCandidate => {
+    if (!shouldAttemptExpansion(candidate.box, candidate.metrics, workWidth, workHeight)) {
+      return candidate;
+    }
+    const expandedBox = expandCandidateToFullCard(candidate.box, sceneBackgroundMask, workWidth, workHeight);
+    const grew = (
+      expandedBox.width > candidate.box.width * 1.04
+      || expandedBox.height > candidate.box.height * 1.04
+    );
+    if (!grew) return candidate;
+    const newMetrics = measureCandidateMetrics(expandedBox, denoisedGray, edges, foregroundMask, workWidth, workHeight);
+    const newAssessment = assessCandidate(expandedBox, newMetrics, workWidth, workHeight, minAreaPercent);
+    if (!newAssessment.accepted) {
+      expansionRejections.push({ candidate, reason: 'expansion_did_not_improve_score' });
+      return candidate;
+    }
+    return {
+      ...candidate,
+      box: expandedBox,
+      bounds: componentToBounds(expandedBox, scale, image.naturalWidth, image.naturalHeight),
+      generatedBy: 'expanded',
+      assessment: newAssessment,
+      metrics: newMetrics,
+    };
+  });
+
+  const prelimAccepted = postExpansionCandidates.filter((candidate) => candidate.assessment.accepted);
+  const prelimRejected = postExpansionCandidates
     .filter((candidate) => !candidate.assessment.accepted)
     .map((candidate) => ({ candidate, reason: candidate.assessment.reason }));
+
+  let fallbackClusterCount = 0;
+
+  // ── Phase 7: Fallback clustering ─────────────────────────────────────────
+  // If far fewer cards found than expected but many rejected components exist,
+  // group those components spatially, expand each cluster to a full-card region,
+  // and rescore. Adds valid clusters back to the accepted pool.
+  if (
+    prelimAccepted.length < Math.ceil(recommendedMax * 0.5)
+    && prelimRejected.length > 1
+  ) {
+    const rescuableBoxes = prelimRejected
+      .filter((r) => (
+        r.candidate.assessment.reason !== 'too_large_background'
+        && r.candidate.assessment.reason !== 'aspect_ratio_out_of_range'
+      ))
+      .map((r) => r.candidate.box);
+
+    const clusters = clusterRejectedComponents(rescuableBoxes, workWidth, workHeight);
+    fallbackClusterCount = clusters.length;
+
+    for (const cluster of clusters) {
+      if (cluster.length < 2) continue;
+
+      const clusterX = cluster.reduce((m, b) => Math.min(m, b.x), cluster[0].x);
+      const clusterY = cluster.reduce((m, b) => Math.min(m, b.y), cluster[0].y);
+      const clusterRight = cluster.reduce((m, b) => Math.max(m, b.x + b.width), 0);
+      const clusterBottom = cluster.reduce((m, b) => Math.max(m, b.y + b.height), 0);
+      const clusterBound: ComponentBox = {
+        x: clusterX,
+        y: clusterY,
+        width: clusterRight - clusterX,
+        height: clusterBottom - clusterY,
+        pixels: cluster.reduce((sum, b) => sum + b.pixels, 0),
+      };
+
+      const expandedCluster = expandCandidateToFullCard(clusterBound, sceneBackgroundMask, workWidth, workHeight);
+      const alreadyCovered = prelimAccepted.some((c) => getIoU(c.box, expandedCluster) > 0.35);
+      if (alreadyCovered) continue;
+
+      const metrics = measureCandidateMetrics(expandedCluster, denoisedGray, edges, foregroundMask, workWidth, workHeight);
+      const assessment = assessCandidate(expandedCluster, metrics, workWidth, workHeight, minAreaPercent);
+      if (!assessment.accepted) continue;
+
+      prelimAccepted.push({
+        index: -(prelimAccepted.length + 1),
+        box: expandedCluster,
+        bounds: componentToBounds(expandedCluster, scale, image.naturalWidth, image.naturalHeight),
+        generatedBy: 'cluster-fallback',
+        assessment,
+        metrics,
+      });
+    }
+  }
 
   const suppression = suppressCandidates(prelimAccepted);
   const cleanedAccepted = sortReadingOrder(nonMaximumSuppression(
@@ -1544,6 +2062,7 @@ export async function detectBusinessCardCrops(
     ...prelimRejected,
     ...suppression.suppressed,
     ...splitRejections,
+    ...expansionRejections,
     ...suppression.accepted.map((candidate) => ({
       candidate,
       reason: selectedSet.has(computeBoxSignature(candidate.box)) ? 'accepted' : 'suppressed_or_merged',
@@ -1649,8 +2168,27 @@ export async function detectBusinessCardCrops(
     warnings.push('Some cards may not have been detected. Try fewer cards per photo or add manual crops.');
   }
 
-  const acceptedOverlayBoxes = crops.map((crop) => ({ bounds: crop.bounds, cropIndex: crop.cropIndex }));
+  const acceptedOverlayBoxes = crops.map((crop) => {
+    const source = candidates.find((candidate) => (
+      candidate.status === 'accepted'
+      && candidate.bounds.x === crop.bounds.x
+      && candidate.bounds.y === crop.bounds.y
+      && candidate.bounds.width === crop.bounds.width
+      && candidate.bounds.height === crop.bounds.height
+    ));
+    return { bounds: crop.bounds, cropIndex: crop.cropIndex, generatedBy: source?.generatedBy };
+  });
   const rejectedForOverlay = candidates.filter((candidate) => candidate.status === 'rejected');
+
+  const textureValues = Array.from(textureMap);
+  const sortedTexture = [...textureValues].sort((a, b) => a - b);
+  const textureMean = textureValues.reduce((sum, value) => sum + value, 0) / Math.max(1, textureValues.length);
+  const textureP90 = sortedTexture[Math.min(sortedTexture.length - 1, Math.floor(sortedTexture.length * 0.9))] ?? 0;
+  const textureMax = sortedTexture[sortedTexture.length - 1] ?? 0;
+
+  const sceneBackgroundCoverage = sceneBackgroundMask.reduce((sum, value) => sum + value, 0) / Math.max(1, sceneBackgroundMask.length);
+  const contourCandidateCount = baseCandidates.filter((candidate) => candidate.generatedBy === 'contour').length;
+  const expandedCandidateCount = postExpansionCandidates.filter((candidate) => candidate.generatedBy === 'expanded').length;
 
   const debug: DetectionDebugInfo = {
     sourceImageName: file.name,
@@ -1658,13 +2196,33 @@ export async function detectBusinessCardCrops(
     imageHeight: image.naturalHeight,
     preFilterCandidateCount: baseCandidates.length,
     acceptedCandidateCount: suppression.accepted.length,
+    contourCandidateCount,
+    expandedCandidateCount,
+    fallbackClusterCount,
     detectedCardCount: crops.length,
     candidateCount: candidates.length,
     rejectedCandidateCount: rejectedForOverlay.length,
+    sceneBackgroundCoverage: Number(sceneBackgroundCoverage.toFixed(4)),
+    textureMapStats: {
+      mean: Number(textureMean.toFixed(2)),
+      p90: Number(textureP90.toFixed(2)),
+      max: Number(textureMax.toFixed(2)),
+    },
     rejectionReasons,
     candidates,
     overlayUrl: showOverlay ? buildDebugOverlay(image, acceptedOverlayBoxes, rejectedForOverlay) : undefined,
-    backgroundModel: debugEnabled ? backgroundModel : undefined,
+    sceneBackgroundModel: debugEnabled
+      ? {
+          clusterCount: sceneBackgroundModel.clusters.length,
+          dominantClusters: sceneBackgroundModel.clusters.map((cluster) => ({
+            h: Number(cluster.h.toFixed(2)),
+            s: Number(cluster.s.toFixed(4)),
+            v: Number(cluster.v.toFixed(4)),
+            weight: Number(cluster.weight.toFixed(4)),
+            texture: Number(cluster.texture.toFixed(2)),
+          })),
+        }
+      : undefined,
   };
 
   if (debugEnabled) {
@@ -1674,6 +2232,11 @@ export async function detectBusinessCardCrops(
     console.log('image width/height:', `${debug.imageWidth}x${debug.imageHeight}`);
     console.log('detected card count:', debug.detectedCardCount);
     console.log('rejected candidate count:', debug.rejectedCandidateCount);
+    console.log('contour candidate count:', debug.contourCandidateCount);
+    console.log('expanded candidate count:', debug.expandedCandidateCount);
+    console.log('fallback cluster count:', debug.fallbackClusterCount);
+    console.log('scene background coverage:', debug.sceneBackgroundCoverage);
+    console.log('texture map stats:', debug.textureMapStats);
     console.log('rejection reasons:', debug.rejectionReasons);
     console.table(crops.map((crop) => ({
       cropIndex: crop.cropIndex,

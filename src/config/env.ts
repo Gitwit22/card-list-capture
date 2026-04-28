@@ -145,10 +145,7 @@ export function loadConfig(): EnvironmentConfig {
     // Card Capture Configuration
     cardCapture: {
       maxFileSizeMb: parseNumber(env.VITE_MAX_FILE_SIZE_MB, 50),
-      allowedFileTypes: parseArray(env.VITE_ALLOWED_FILE_TYPES, [
-        'pdf', 'jpg', 'jpeg', 'png', 'gif', 'webp', 'heic', 'bmp', 'tiff', 'tif',
-        'doc', 'docx', 'xls', 'xlsx', 'csv', 'txt', 'rtf', 'ppt', 'pptx',
-      ]),
+      allowedFileTypes: parseArray(env.VITE_ALLOWED_FILE_TYPES, ['pdf', 'jpg', 'jpeg', 'png']),
     },
 
     // Monitoring
