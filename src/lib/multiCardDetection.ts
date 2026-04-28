@@ -45,6 +45,7 @@ export interface DetectionDebugInfo {
   rejectionReasons: Record<string, number>;
   candidates: DetectionCandidateDebug[];
   overlayUrl?: string;
+  backgroundModel?: { r: number; g: number; b: number; radius: number };
 }
 
 export interface MultiCardDetectionResult {
@@ -98,6 +99,13 @@ interface DetectionCandidate {
   generatedBy: CandidateOrigin;
   assessment: CandidateAssessment;
   metrics: CandidateMetrics;
+}
+
+interface BackgroundModel {
+  r: number;
+  g: number;
+  b: number;
+  radius: number;
 }
 
 const MAX_EDGE_DIMENSION = 1400;
@@ -440,7 +448,76 @@ function getAxisGapAndOverlap(
   return { gap, overlap };
 }
 
-function shouldMergeByProximity(a: ComponentBox, b: ComponentBox): boolean {
+function hasBackgroundGapBetween(
+  a: ComponentBox,
+  b: ComponentBox,
+  backgroundMask: Uint8Array,
+  width: number,
+): boolean {
+  const aRight = a.x + a.width;
+  const bRight = b.x + b.width;
+  const aBottom = a.y + a.height;
+  const bBottom = b.y + b.height;
+
+  // Horizontal gap (side by side)
+  const xGapL = Math.min(aRight, bRight);
+  const xGapR = Math.max(a.x, b.x);
+  const yOverlapT = Math.max(a.y, b.y);
+  const yOverlapB = Math.min(aBottom, bBottom);
+
+  // Vertical gap (stacked)
+  const yGapT = Math.min(aBottom, bBottom);
+  const yGapB = Math.max(a.y, b.y);
+  const xOverlapL = Math.max(a.x, b.x);
+  const xOverlapR = Math.min(aRight, bRight);
+
+  let gapX1: number;
+  let gapX2: number;
+  let gapY1: number;
+  let gapY2: number;
+
+  if (xGapL < xGapR && yOverlapT < yOverlapB) {
+    gapX1 = xGapL;
+    gapX2 = xGapR;
+    gapY1 = yOverlapT;
+    gapY2 = yOverlapB;
+  } else if (yGapT < yGapB && xOverlapL < xOverlapR) {
+    gapX1 = xOverlapL;
+    gapX2 = xOverlapR;
+    gapY1 = yGapT;
+    gapY2 = yGapB;
+  } else {
+    return false;
+  }
+
+  let bgCount = 0;
+  let totalCount = 0;
+  for (let y = gapY1; y < gapY2; y += 1) {
+    const rowOffset = y * width;
+    for (let x = gapX1; x < gapX2; x += 1) {
+      totalCount += 1;
+      if (backgroundMask[rowOffset + x]) bgCount += 1;
+    }
+  }
+
+  if (totalCount < 4) return false;
+  return bgCount / totalCount >= 0.60;
+}
+
+function shouldMergeByProximity(
+  a: ComponentBox,
+  b: ComponentBox,
+  backgroundMask?: Uint8Array,
+  imageWidth?: number,
+): boolean {
+  // Background-aware guard: if the gap between the two boxes is dominated
+  // by background pixels, they are definitely separate cards — never merge.
+  if (backgroundMask && imageWidth !== undefined) {
+    if (hasBackgroundGapBetween(a, b, backgroundMask, imageWidth)) {
+      return false;
+    }
+  }
+
   const minSide = Math.min(a.width, a.height, b.width, b.height);
   const maxGap = Math.max(5, Math.round(minSide * 0.08));
 
@@ -496,7 +573,11 @@ function shouldMergeByProximity(a: ComponentBox, b: ComponentBox): boolean {
   return true;
 }
 
-function mergeNearbyBoxes(boxes: ComponentBox[]): ComponentBox[] {
+function mergeNearbyBoxes(
+  boxes: ComponentBox[],
+  backgroundMask?: Uint8Array,
+  imageWidth?: number,
+): ComponentBox[] {
   const working = [...boxes];
   let merged = true;
 
@@ -508,7 +589,7 @@ function mergeNearbyBoxes(boxes: ComponentBox[]): ComponentBox[] {
         const a = working[i];
         const b = working[j];
 
-        if (getIoU(a, b) > 0.12 || shouldMergeByProximity(a, b)) {
+        if (getIoU(a, b) > 0.12 || shouldMergeByProximity(a, b, backgroundMask, imageWidth)) {
           working[i] = mergeBoxes(a, b);
           working.splice(j, 1);
           merged = true;
@@ -572,7 +653,290 @@ export const multiCardDetectionTestUtils = {
   overlapOverSmaller,
   insideRatio,
   splitWideBoxFromProjection,
+  estimateBackground,
+  buildBackgroundMask,
+  splitBoxByBackgroundGaps,
+  findBackgroundSplitBands,
+  hasBackgroundGapBetween,
 };
+
+// ─── Background-aware segmentation helpers ──────────────────────────────────
+
+function estimateBackground(
+  imageData: ImageData,
+  width: number,
+  height: number,
+): BackgroundModel {
+  const borderDepth = Math.max(8, Math.round(Math.min(width, height) * 0.05));
+  const data = imageData.data;
+  let sumR = 0;
+  let sumG = 0;
+  let sumB = 0;
+  let count = 0;
+
+  function sample(x: number, y: number): void {
+    const idx = (y * width + x) * 4;
+    sumR += data[idx];
+    sumG += data[idx + 1];
+    sumB += data[idx + 2];
+    count += 1;
+  }
+
+  for (let y = 0; y < borderDepth; y += 1) {
+    for (let x = 0; x < width; x += 1) sample(x, y);
+  }
+  for (let y = height - borderDepth; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) sample(x, y);
+  }
+  for (let y = borderDepth; y < height - borderDepth; y += 1) {
+    for (let x = 0; x < borderDepth; x += 1) sample(x, y);
+    for (let x = width - borderDepth; x < width; x += 1) sample(x, y);
+  }
+
+  if (count === 0) return { r: 200, g: 200, b: 200, radius: 40 };
+
+  const meanR = sumR / count;
+  const meanG = sumG / count;
+  const meanB = sumB / count;
+
+  // RMSD over all three channels to estimate background spread (texture/shadows)
+  let sumVar = 0;
+  function addVar(x: number, y: number): void {
+    const idx = (y * width + x) * 4;
+    const dr = data[idx] - meanR;
+    const dg = data[idx + 1] - meanG;
+    const db = data[idx + 2] - meanB;
+    sumVar += dr * dr + dg * dg + db * db;
+  }
+  for (let y = 0; y < borderDepth; y += 1) {
+    for (let x = 0; x < width; x += 1) addVar(x, y);
+  }
+  for (let y = height - borderDepth; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) addVar(x, y);
+  }
+  for (let y = borderDepth; y < height - borderDepth; y += 1) {
+    for (let x = 0; x < borderDepth; x += 1) addVar(x, y);
+    for (let x = width - borderDepth; x < width; x += 1) addVar(x, y);
+  }
+
+  const rmsd = Math.sqrt(sumVar / (3 * Math.max(1, count)));
+  // Radius covers natural background variation (shadows, texture, gradient)
+  const radius = clamp(Math.round(rmsd * 2.2 + 25), 22, 90);
+
+  return { r: meanR, g: meanG, b: meanB, radius };
+}
+
+function buildBackgroundMask(
+  imageData: ImageData,
+  width: number,
+  height: number,
+  model: BackgroundModel,
+): Uint8Array {
+  const mask = new Uint8Array(width * height);
+  const data = imageData.data;
+  const { r: br, g: bg, b: bb, radius } = model;
+
+  for (let i = 0, j = 0; i < data.length; i += 4, j += 1) {
+    // Chebyshev distance in RGB space — fast and handles colored backgrounds
+    const dr = Math.abs(data[i] - br);
+    const dg = Math.abs(data[i + 1] - bg);
+    const db = Math.abs(data[i + 2] - bb);
+    mask[j] = dr <= radius && dg <= radius && db <= radius ? 1 : 0;
+  }
+
+  return mask;
+}
+
+function getColumnBackgroundProjection(
+  backgroundMask: Uint8Array,
+  width: number,
+  box: ComponentBox,
+): Uint16Array {
+  const projection = new Uint16Array(box.width);
+  const left = clamp(box.x, 0, width - 1);
+  const right = clamp(box.x + box.width, 0, width);
+  const bottom = box.y + box.height;
+
+  for (let y = box.y; y < bottom; y += 1) {
+    const rowOffset = y * width;
+    for (let x = left; x < right; x += 1) {
+      if (backgroundMask[rowOffset + x]) projection[x - left] += 1;
+    }
+  }
+  return projection;
+}
+
+function getRowBackgroundProjection(
+  backgroundMask: Uint8Array,
+  width: number,
+  box: ComponentBox,
+): Uint16Array {
+  const projection = new Uint16Array(box.height);
+  const left = clamp(box.x, 0, width - 1);
+  const right = clamp(box.x + box.width, 0, width);
+  const bottom = box.y + box.height;
+
+  for (let y = box.y; y < bottom; y += 1) {
+    const rowOffset = y * width;
+    let rowBg = 0;
+    for (let x = left; x < right; x += 1) {
+      if (backgroundMask[rowOffset + x]) rowBg += 1;
+    }
+    projection[y - box.y] = rowBg;
+  }
+  return projection;
+}
+
+function findBackgroundSplitBands(
+  projection: Uint16Array,
+  perpendicularSize: number,
+  minBgFraction: number,
+  minBandPx: number,
+): number[] {
+  const threshold = Math.round(perpendicularSize * minBgFraction);
+  const smoothed = smoothProjection(projection);
+  const cutPositions: number[] = [];
+  let bandStart = -1;
+
+  for (let i = 0; i < smoothed.length; i += 1) {
+    const isBackground = smoothed[i] >= threshold;
+    if (isBackground && bandStart < 0) {
+      bandStart = i;
+    }
+    if (!isBackground && bandStart >= 0) {
+      const bandLen = i - bandStart;
+      if (bandLen >= minBandPx) {
+        cutPositions.push(bandStart + Math.round(bandLen / 2));
+      }
+      bandStart = -1;
+    }
+  }
+  if (bandStart >= 0) {
+    const bandLen = smoothed.length - bandStart;
+    if (bandLen >= minBandPx) {
+      cutPositions.push(bandStart + Math.round(bandLen / 2));
+    }
+  }
+
+  return cutPositions;
+}
+
+/**
+ * Background-aware split. Analyses both vertical and horizontal background
+ * projection profiles to find columns/rows that are dominated by background
+ * pixels, indicating the gap between two separate cards. Handles:
+ *   - Side-by-side cards (vertical column split)
+ *   - Stacked cards     (horizontal row split)
+ *   - Lower aspect-ratio boxes than the legacy foreground-projection split
+ */
+function splitBoxByBackgroundGaps(
+  box: ComponentBox,
+  backgroundMask: Uint8Array,
+  foreground: Uint8Array,
+  width: number,
+  height: number,
+): ComponentBox[] {
+  const ratio = box.width / Math.max(1, box.height);
+
+  // ── Vertical split: columns dominated by background (side-by-side cards) ──
+  // Trigger when box is wider than ~1.5× its height, or covers >40% of image width.
+  if (ratio >= 1.5 || box.width > width * 0.4) {
+    const colProjection = getColumnBackgroundProjection(backgroundMask, width, box);
+    const minBandPx = Math.max(6, Math.round(box.width * 0.025));
+    const vertCuts = findBackgroundSplitBands(colProjection, box.height, 0.52, minBandPx);
+
+    if (vertCuts.length > 0) {
+      const boundaries = [0, ...vertCuts, box.width];
+      const children: ComponentBox[] = [];
+
+      for (let i = 0; i < boundaries.length - 1; i += 1) {
+        const startOff = boundaries[i];
+        const endOff = boundaries[i + 1];
+        const childWidth = endOff - startOff;
+        // Child must be wide enough to plausibly be a single card
+        if (childWidth < Math.round(box.height * 0.55)) continue;
+
+        // Refine vertical extent using foreground mask
+        const childX = box.x + startOff;
+        let minY = box.y + box.height;
+        let maxY = box.y;
+        let pixels = 0;
+        for (let y = box.y; y < box.y + box.height; y += 1) {
+          const rowOffset = y * width;
+          for (let x = childX; x < childX + childWidth; x += 1) {
+            if (foreground[clamp(rowOffset + x, 0, foreground.length - 1)]) {
+              pixels += 1;
+              if (y < minY) minY = y;
+              if (y > maxY) maxY = y;
+            }
+          }
+        }
+        if (pixels === 0 || minY > maxY) continue;
+
+        children.push({
+          x: childX,
+          y: clamp(minY, box.y, box.y + box.height - 1),
+          width: childWidth,
+          height: Math.max(1, maxY - minY + 1),
+          pixels,
+        });
+      }
+
+      if (children.length >= 2) return children;
+    }
+  }
+
+  // ── Horizontal split: rows dominated by background (stacked cards) ─────────
+  // Trigger when box is taller than expected for a single card, or nearly
+  // square/portrait, or covers >40% of image height.
+  if (ratio <= 1.8 || box.height > height * 0.4) {
+    const rowProjection = getRowBackgroundProjection(backgroundMask, width, box);
+    const minBandPx = Math.max(6, Math.round(box.height * 0.025));
+    const horizCuts = findBackgroundSplitBands(rowProjection, box.width, 0.52, minBandPx);
+
+    if (horizCuts.length > 0) {
+      const boundaries = [0, ...horizCuts, box.height];
+      const children: ComponentBox[] = [];
+
+      for (let i = 0; i < boundaries.length - 1; i += 1) {
+        const startOff = boundaries[i];
+        const endOff = boundaries[i + 1];
+        const childHeight = endOff - startOff;
+        // Child must be tall enough relative to box width to be a single card
+        if (childHeight < Math.round(box.width * 0.35)) continue;
+
+        // Refine horizontal extent using foreground mask
+        const childY = box.y + startOff;
+        let minX = box.x + box.width;
+        let maxX = box.x;
+        let pixels = 0;
+        for (let y = childY; y < childY + childHeight; y += 1) {
+          const rowOffset = y * width;
+          for (let x = box.x; x < box.x + box.width; x += 1) {
+            if (foreground[clamp(rowOffset + x, 0, foreground.length - 1)]) {
+              pixels += 1;
+              if (x < minX) minX = x;
+              if (x > maxX) maxX = x;
+            }
+          }
+        }
+        if (pixels === 0 || minX > maxX) continue;
+
+        children.push({
+          x: clamp(minX, box.x, box.x + box.width - 1),
+          y: childY,
+          width: Math.max(1, maxX - minX + 1),
+          height: childHeight,
+          pixels,
+        });
+      }
+
+      if (children.length >= 2) return children;
+    }
+  }
+
+  return [box];
+}
 
 function sortReadingOrder(boxes: ComponentBox[]): ComponentBox[] {
   if (boxes.length <= 1) return boxes;
@@ -1051,10 +1415,20 @@ export async function detectBusinessCardCrops(
 
   workContext.drawImage(image, 0, 0, workWidth, workHeight);
 
-  const gray = normalizeContrast(toGrayArray(workContext.getImageData(0, 0, workWidth, workHeight)));
+  const workImageData = workContext.getImageData(0, 0, workWidth, workHeight);
+  const gray = normalizeContrast(toGrayArray(workImageData));
   const denoisedGray = boxBlur(gray, workWidth, workHeight, 1, 1);
   const foregroundMask = openBinary(adaptiveForegroundMask(denoisedGray, workWidth, workHeight), workWidth, workHeight);
   const edges = closeBinary(edgeMap(denoisedGray, workWidth, workHeight), workWidth, workHeight);
+
+  // ── Background-aware segmentation ─────────────────────────────────────────
+  // Sample image borders to estimate the table/desk background color, then
+  // build a binary mask marking pixels that belong to the background plane.
+  // This mask is used as a first-class signal for: merge guards (don't merge
+  // card components separated by background) and split detection (find rows/
+  // columns dominated by background to locate card boundaries).
+  const backgroundModel = estimateBackground(workImageData, workWidth, workHeight);
+  const backgroundMask = buildBackgroundMask(workImageData, workWidth, workHeight, backgroundModel);
 
   const componentMinPixels = Math.max(80, Math.round(workWidth * workHeight * 0.0012));
   const components = collectConnectedComponents(foregroundMask, workWidth, workHeight)
@@ -1067,7 +1441,9 @@ export async function detectBusinessCardCrops(
       height: clamp(component.height + 4, 1, workHeight),
     }));
 
-  const mergedBoxes = mergeNearbyBoxes(components);
+  // Pass background mask so that components separated by visible background
+  // are never merged into a single candidate.
+  const mergedBoxes = mergeNearbyBoxes(components, backgroundMask, workWidth);
 
   const baseCandidates = mergedBoxes.map((box, index): DetectionCandidate => {
     const metrics = measureCandidateMetrics(box, denoisedGray, edges, foregroundMask, workWidth, workHeight);
@@ -1087,8 +1463,38 @@ export async function detectBusinessCardCrops(
   const splitRejections: Array<{ candidate: DetectionCandidate; reason: string }> = [];
 
   baseCandidates.forEach((candidate) => {
-    const children = splitWideCandidate(candidate.box, foregroundMask, workWidth, workHeight);
+    // Use background-aware split first (handles both side-by-side and stacked
+    // cards). Falls back to no-split automatically if no background bands found.
+    const children = splitBoxByBackgroundGaps(
+      candidate.box,
+      backgroundMask,
+      foregroundMask,
+      workWidth,
+      workHeight,
+    );
     if (children.length <= 1) {
+      // Also try the legacy foreground-gap wide split as a secondary pass.
+      const legacyChildren = splitWideCandidate(candidate.box, foregroundMask, workWidth, workHeight);
+      if (legacyChildren.length > 1) {
+        const legacySplitChildren = legacyChildren.map((child, childIndex): DetectionCandidate => {
+          const metrics = measureCandidateMetrics(child, denoisedGray, edges, foregroundMask, workWidth, workHeight);
+          const assessment = assessCandidate(child, metrics, workWidth, workHeight, minAreaPercent);
+          return {
+            index: candidate.index * 100 + childIndex,
+            box: child,
+            bounds: componentToBounds(child, scale, image.naturalWidth, image.naturalHeight),
+            generatedBy: 'split',
+            assessment,
+            metrics,
+          };
+        });
+        const validLegacy = legacySplitChildren.filter((c) => c.assessment.accepted);
+        if (validLegacy.length >= 2) {
+          expandedCandidates.push(...legacySplitChildren);
+          splitRejections.push({ candidate, reason: 'split_into_children' });
+          return;
+        }
+      }
       expandedCandidates.push(candidate);
       return;
     }
@@ -1195,6 +1601,19 @@ export async function detectBusinessCardCrops(
       warningsForCrop.push('Aspect ratio is unusual for a business card.');
     }
 
+    // Warn when a single large crop might contain more than one card.
+    // Heuristic: the crop covers more than 28 % of the image AND its
+    // normalised aspect ratio deviates noticeably from typical card shapes.
+    const closestRatioDistance = getClosestCardRatioDistance(normalizedRatio);
+    if (
+      crops.length === 0 // we haven't pushed any crop yet — this is the first one
+      && selectedBoxes.length === 1
+      && areaPercent > 0.28
+      && closestRatioDistance > 0.18
+    ) {
+      warningsForCrop.push('Possible multiple cards detected — review crop box.');
+    }
+
     const cropped = await cropCardToFile(sourceCanvas, bounds, file.name, index + 1);
 
     crops.push({
@@ -1245,6 +1664,7 @@ export async function detectBusinessCardCrops(
     rejectionReasons,
     candidates,
     overlayUrl: showOverlay ? buildDebugOverlay(image, acceptedOverlayBoxes, rejectedForOverlay) : undefined,
+    backgroundModel: debugEnabled ? backgroundModel : undefined,
   };
 
   if (debugEnabled) {
