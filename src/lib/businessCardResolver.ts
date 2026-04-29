@@ -6,6 +6,17 @@
  * Does NOT call any API — operates only on the string passed in.
  */
 
+// ─── Placeholder labels that must never be saved as field values ──────────────
+// e.g. if the OCR or API returns "Company" as the company value, it is empty.
+const PLACEHOLDER_LABELS = new Set([
+  'company', 'email', 'website', 'address', 'phone', 'title',
+  'first name', 'last name', 'firstname', 'lastname', 'name',
+]);
+
+export function isPlaceholder(value: string): boolean {
+  return !value || PLACEHOLDER_LABELS.has(value.trim().toLowerCase());
+}
+
 // ─── Credential suffixes to strip from person names ───────────────────────────
 const CREDENTIAL_SUFFIXES = new Set([
   'RDN', 'RN', 'LPN', 'CNA', 'NP', 'APRN', 'CNP', 'NNP', 'CRNA',
@@ -36,7 +47,11 @@ const SERVICE_WORDS = new Set([
 // ─── Organization-line detection ──────────────────────────────────────────────
 // Lines matching these patterns should never become person names.
 const ORG_LINE_PREFIXES = /^(state of|city of|county of|office of|department of|ministry of|bureau of|university of|republic of|province of)\b/i;
-const ORG_LINE_KEYWORDS = /\b(department|county|township|parish|borough|city of|university|ministry|ministries|church|office of|government|bureau|division|authority|commission|tribunal|district)\b/i;
+const ORG_LINE_KEYWORDS = /\b(department|county|township|parish|borough|city of|university|ministry|ministries|church|office of|government|bureau|division|authority|commission|tribunal|district|legislature|senate|house of representatives|representatives|congress)\b/i;
+
+// Org-indicator keywords present in mixed-case company / org names.
+// A line containing any of these must never be treated as a person name.
+const COMPANY_ORG_KEYWORD_RE = /\b(inc\.?|llc\.?|ltd\.?|corp\.?|foundation|police|league|fundraising|senate|legislature|representatives|ministries|nonprofit|associates|authority|commission|council)\b/i;
 
 function isOrgLine(line: string): boolean {
   const trimmed = line.trim();
@@ -444,6 +459,8 @@ function isPersonNameCandidate(line: string): boolean {
   if (/^P\.?\s*O\.?\s*Box/i.test(trimmed)) return false;
   // Organization lines must never become person names
   if (isOrgLine(trimmed)) return false;
+  // Lines with company/org suffix keywords must never become person names
+  if (COMPANY_ORG_KEYWORD_RE.test(trimmed)) return false;
   // Service/category lines must never become person names
   if (isServiceOrCategoryLine(trimmed)) return false;
 
@@ -469,6 +486,17 @@ function isPersonNameCandidate(line: string): boolean {
   return true;
 }
 
+export interface ResolvedFieldConfidence {
+  firstName?: number;
+  lastName?: number;
+  company?: number;
+  title?: number;
+  phone?: number;
+  email?: number;
+  website?: number;
+  address?: number;
+}
+
 export interface ResolvedCard {
   fullName: string;
   firstName: string;
@@ -490,6 +518,8 @@ export interface ResolvedCard {
   address: string;
   extraFields: Record<string, string>;
   warnings: string[];
+  fieldConfidence?: ResolvedFieldConfidence;
+  overallConfidence?: number;
 }
 
 /**
@@ -593,35 +623,45 @@ export function resolveFromRawText(rawText: string): Partial<ResolvedCard> {
 
     if (streetIdx >= 0) {
       const parts: string[] = [];
+      const anchor = lines[streetIdx];
 
-      // Look back one line for a building/place name.
-      // We only include it if it contains a known building-type word, so that
-      // person names like "Jane Smith" (before the street) are not captured.
+      // Look back one line for a building/place name or a street line preceding a P.O. Box.
       const prev = lines[streetIdx - 1] ?? '';
-      if (
-        prev &&
-        BUILDING_NAME_RE.test(prev) &&
-        !isAllCapsLine(prev) &&
-        !looksLikeEmail(prev) &&
-        !looksLikePhone(prev) &&
-        !looksLikeCityStateZip(prev) &&
-        !PHONE_LABEL_RE.test(prev) &&
-        !looksLikeDomain(prev)
-      ) {
-        parts.push(prev);
+      const isPOBoxAnchor = /^P\.?\s*O\.?\s*Box/i.test(anchor);
+      if (prev && !looksLikeEmail(prev) && !looksLikePhone(prev) && !looksLikeCityStateZip(prev) && !PHONE_LABEL_RE.test(prev) && !looksLikeDomain(prev)) {
+        if (isPOBoxAnchor && (NUMBERED_STREET_RE.test(prev) || STREET_SUFFIX_RE.test(prev))) {
+          // Street line precedes a P.O. Box — include it as the first address part
+          parts.push(prev);
+        } else if (!isPOBoxAnchor && BUILDING_NAME_RE.test(prev) && !isAllCapsLine(prev)) {
+          // Building/campus name precedes a numbered street
+          parts.push(prev);
+        }
       }
 
-      parts.push(lines[streetIdx]);
+      parts.push(anchor);
 
       // Look forward for suite / floor line then city/state/ZIP
       const next1 = lines[streetIdx + 1] ?? '';
       const next2 = lines[streetIdx + 2] ?? '';
+      const next3 = lines[streetIdx + 3] ?? '';
       if (SUITE_LINE_RE.test(next1)) {
         parts.push(next1);
         if (CITY_STATE_ZIP_RE.test(next2) || ZIP_RE.test(next2)) {
           parts.push(next2);
         }
-      } else if (CITY_STATE_ZIP_RE.test(next1) || ZIP_RE.test(next1)) {
+      } else if (CITY_STATE_ZIP_RE.test(next1)) {
+        parts.push(next1);
+      } else if (/^P\.?\s*O\.?\s*Box/i.test(next1)) {
+        // P.O. Box follows the street line — include it and look for city/state/ZIP
+        parts.push(next1);
+        if (CITY_STATE_ZIP_RE.test(next2)) {
+          parts.push(next2);
+        } else if (CITY_STATE_ZIP_RE.test(next3)) {
+          parts.push(next2); // intermediate line (e.g. second address line)
+          parts.push(next3);
+        }
+      } else if (next1 && ZIP_RE.test(next1) && !CITY_STATE_ZIP_RE.test(next1)) {
+        // ZIP-only on next line (rare) — just include it
         parts.push(next1);
       } else if (next1 && CITY_STATE_ZIP_RE.test(next2)) {
         // next1 is a continued address line (e.g. second street line)
@@ -648,6 +688,7 @@ export function resolveFromRawText(rawText: string): Partial<ResolvedCard> {
   let department: string | undefined;
   let organizationUnit: string | undefined;
   let companyEndIndex = -1;
+  let companySource: 'org-hierarchy' | 'stacked-caps' | 'single-caps' | 'domain' | '' = '';
 
   {
     const stackedCaps: string[] = [];
@@ -660,7 +701,10 @@ export function resolveFromRawText(rawText: string): Partial<ResolvedCard> {
       if (looksLikeEmail(line) || looksLikePhone(line)) break;
 
       if (isAllCapsLine(line)) {
-        stackedCaps.push(line.replace(/[®™]/g, '').trim());
+        // Skip pure placeholder label lines (e.g. "COMPANY", "EMAIL")
+        const normalized = line.replace(/[®™]/g, '').trim();
+        if (isPlaceholder(normalized)) continue;
+        stackedCaps.push(normalized);
         companyEndIndex = i;
       } else if (stackedCaps.length > 0) {
         // Stack broken — stop collecting
@@ -673,9 +717,11 @@ export function resolveFromRawText(rawText: string): Partial<ResolvedCard> {
       company = toTitleCase(stackedCaps[0]);
       department = toTitleCase(stackedCaps[1]);
       if (stackedCaps.length >= 3) organizationUnit = toTitleCase(stackedCaps[2]);
+      companySource = 'org-hierarchy';
     } else if (stackedCaps.length >= 2) {
       // Logo/brand name split across multiple short lines — join all into company
       company = toTitleCase(stackedCaps.join(' '));
+      companySource = 'stacked-caps';
     } else if (stackedCaps.length === 1) {
       // Single all-caps line — may be company if it looks like a brand/domain
       const lineRaw = stackedCaps[0];
@@ -693,8 +739,10 @@ export function resolveFromRawText(rawText: string): Partial<ResolvedCard> {
         if (!website) {
           website = cleanWebsite(lineRaw.toLowerCase()) || lineRaw.toLowerCase().replace(/[®™]/g, '');
         }
+        companySource = 'single-caps';
       } else if (!isBareState(lineRaw) && !SERVICE_WORDS.has(lineRaw.toLowerCase())) {
         company = single;
+        companySource = 'single-caps';
       }
     }
   }
@@ -707,6 +755,7 @@ export function resolveFromRawText(rawText: string): Partial<ResolvedCard> {
     if (inferred) {
       company = inferred;
       inferredCompanySource = 'domain';
+      companySource = 'domain';
     }
   }
 
@@ -732,6 +781,15 @@ export function resolveFromRawText(rawText: string): Partial<ResolvedCard> {
     if (looksLikeEmail(line)) continue;
     if (looksLikePhone(line)) continue;
     if (looksLikeDomain(line)) continue;
+
+    // Check honorific BEFORE address filter: "Dr." also matches STREET_SUFFIX_RE "dr" (drive).
+    // Honorific lines are unambiguously person names, so promote them immediately.
+    if (hasHonorific(line)) {
+      const credParsed = stripCredentials(line);
+      nameCandidates.push({ credParsed, score: 10, index: i });
+      continue;
+    }
+
     if (looksLikeAddress(line)) continue;
     if (looksLikeCityStateZip(line)) continue;
     if (isBareState(line)) continue;
@@ -741,13 +799,6 @@ export function resolveFromRawText(rawText: string): Partial<ResolvedCard> {
     // Service/category lines → captured for output, never used as name
     if (isServiceOrCategoryLine(line)) {
       serviceLines.push(line);
-      continue;
-    }
-
-    // Honorific fast-path: unambiguous person name
-    if (hasHonorific(line)) {
-      const credParsed = stripCredentials(line);
-      nameCandidates.push({ credParsed, score: 10, index: i });
       continue;
     }
 
@@ -811,26 +862,107 @@ export function resolveFromRawText(rawText: string): Partial<ResolvedCard> {
   if (!company) warnings.push('company_not_found');
   if (fax && phone === fax) warnings.push('fax_promoted_as_phone');
 
+  // ── 10. Placeholder cleaning ──────────────────────────────────────────────
+  // Clear any field that ended up as a known placeholder label (e.g. "Company").
+  const cleanCompany = isPlaceholder(company) ? '' : company;
+  const cleanFullName = isPlaceholder(fullName) ? '' : fullName;
+  const cleanTitle = isPlaceholder(title) ? '' : title;
+  const cleanPhone = isPlaceholder(phone) ? '' : phone;
+  const cleanEmail = isPlaceholder(email) ? '' : email;
+  const cleanWebsiteVal = isPlaceholder(website) ? '' : website;
+  const cleanAddress = isPlaceholder(address) ? '' : address;
+
+  // When fullName resolves to a placeholder (e.g. "First Name"), clear firstName and lastName too.
+  const fnameWasPlaceholder = isPlaceholder(fullName);
+  const cleanFirstName = (fnameWasPlaceholder || isPlaceholder(firstName)) ? '' : firstName;
+  const cleanLastName  = (fnameWasPlaceholder || isPlaceholder(lastName))  ? '' : lastName;
+
+  // ── 11. Per-field confidence scoring ─────────────────────────────────────
+  const fieldConfidence: ResolvedFieldConfidence = {};
+
+  if (cleanEmail) {
+    fieldConfidence.email = 0.95;
+  }
+
+  if (cleanWebsiteVal) {
+    fieldConfidence.website = 0.90;
+  }
+
+  if (cleanPhone) {
+    const hasLabel = nonFaxPairs.some((p) => p.label && !FAX_LABEL_RE.test(p.label));
+    fieldConfidence.phone = hasLabel ? 0.90 : 0.80;
+  }
+
+  if (cleanAddress) {
+    const addressLines = cleanAddress.split('\n');
+    const hasStreet = addressLines.some(
+      (l) => NUMBERED_STREET_RE.test(l) || STREET_SUFFIX_RE.test(l) || /^P\.?\s*O\.?\s*Box/i.test(l),
+    );
+    const hasCityZip = addressLines.some((l) => CITY_STATE_ZIP_RE.test(l.trim()));
+    if (hasStreet && hasCityZip) fieldConfidence.address = 0.90;
+    else if (hasStreet) fieldConfidence.address = 0.70;
+    else if (hasCityZip) fieldConfidence.address = 0.60;
+    else fieldConfidence.address = 0.50;
+  }
+
+  if (cleanCompany) {
+    switch (companySource) {
+      case 'org-hierarchy': fieldConfidence.company = 0.90; break;
+      case 'stacked-caps':  fieldConfidence.company = 0.85; break;
+      case 'single-caps':   fieldConfidence.company = 0.80; break;
+      case 'domain':        fieldConfidence.company = 0.50; break;
+      default:              fieldConfidence.company = 0.70; break;
+    }
+  }
+
+  if (cleanFullName) {
+    const bestScore = nameCandidates.length > 0 ? nameCandidates[0].score : 0;
+    if (bestScore >= 10) {
+      fieldConfidence.firstName = 0.95;
+      fieldConfidence.lastName  = 0.90;
+    } else if (bestScore >= 5) {
+      fieldConfidence.firstName = 0.85;
+      fieldConfidence.lastName  = 0.80;
+    } else if (bestScore >= 1) {
+      fieldConfidence.firstName = 0.70;
+      fieldConfidence.lastName  = 0.65;
+    } else {
+      fieldConfidence.firstName = 0.50;
+      fieldConfidence.lastName  = 0.45;
+    }
+  }
+
+  if (cleanTitle && cleanTitle !== credentials) {
+    fieldConfidence.title = TITLE_ROLE_KEYWORDS.test(cleanTitle) ? 0.85 : 0.70;
+  }
+
+  const confidenceValues = Object.values(fieldConfidence).filter((v): v is number => v !== undefined);
+  const overallConfidence = confidenceValues.length > 0
+    ? confidenceValues.reduce((a, b) => a + b, 0) / confidenceValues.length
+    : 0;
+
   return {
-    fullName,
-    firstName,
-    lastName,
+    fullName: cleanFullName,
+    firstName: cleanFirstName,
+    lastName: cleanLastName,
     credentials,
-    company,
+    company: cleanCompany,
     ...(department !== undefined && { department }),
     ...(organizationUnit !== undefined && { organizationUnit }),
-    title,
+    title: cleanTitle,
     ...(subtitle !== undefined && { subtitle }),
     ...(serviceCategory ? { serviceCategory } : {}),
     ...(services ? { services } : {}),
     ...(inferredCompanySource ? { inferredCompanySource } : {}),
-    phone,
+    phone: cleanPhone,
     ...(fax ? { fax } : {}),
     otherPhones,
-    email,
-    website,
-    address,
+    email: cleanEmail,
+    website: cleanWebsiteVal,
+    address: cleanAddress,
     extraFields: {},
     warnings,
+    fieldConfidence,
+    overallConfidence,
   };
 }
