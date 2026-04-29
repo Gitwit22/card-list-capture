@@ -43,7 +43,17 @@ import {
 import { detectBusinessCardCrops, type DetectionDebugInfo } from '@/lib/multiCardDetection';
 import { CropModal } from '@/components/business-cards/CropModal';
 import { ManualEntryModal } from '@/components/business-cards/ManualEntryModal';
+import { ExportPreviewModal } from '@/components/business-cards/ExportPreviewModal';
 import { toast } from 'sonner';
+import {
+  runBatchAnalysis,
+  buildBatchCorrectionSuggestions,
+  addCorrectionRule,
+  analyzeBatch,
+  type BatchCorrectionSuggestion,
+} from '@/lib/batchBusinessCardResolver';
+import { validateBatch } from '@/lib/exportValidation';
+import { BatchCorrectionRule, ScanSessionCorrections } from '@/types/scan';
 
 type Step = 'capture' | 'batch-queue' | 'processing' | 'batch-processing' | 'review';
 type BusinessCardFilter = 'all' | 'needs_review' | 'complete' | 'failed';
@@ -140,6 +150,11 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
   const [singleCardDraft, setSingleCardDraft] = useState<BatchCardItem | null>(null);
   const [rapidPendingCardId, setRapidPendingCardId] = useState<string | null>(null);
   const [businessCardFilter, setBusinessCardFilter] = useState<BusinessCardFilter>('all');
+  // Phase 3 state
+  const [sessionCorrections, setSessionCorrections] = useState<ScanSessionCorrections>({ rules: [] });
+  const [focusedCardId, setFocusedCardId] = useState<string | null>(null);
+  const [exportPreviewOpen, setExportPreviewOpen] = useState(false);
+  const [batchCorrectionSuggestions, setBatchCorrectionSuggestions] = useState<Record<string, BatchCorrectionSuggestion[]>>({});
   const [exportFormatSelection, setExportFormatSelection] = useState<Record<ExportFormat, boolean>>({
     xlsx: true,
     csv: false,
@@ -1140,7 +1155,9 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
         needsReview: Boolean(merged.needsReview || (merged.warnings?.length ?? 0) > 0 || merged.conflictFields?.length),
       };
 
-      setData([row]);
+      // Phase 3: run batch analysis + export validation
+      const [analyzedRow] = validateBatch(runBatchAnalysis([row], sessionCorrections));
+      setData([analyzedRow]);
       setBusinessCardFilter('all');
       setStep('review');
       setSingleCardDraft(draft);
@@ -1202,9 +1219,11 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
       setBatchQueue(nextItems);
 
       const rows = buildReviewRowsFromQueue(nextItems);
-      setData(rows);
-      setBatchSessionRows(rows);
-      setBusinessCardFilter(rows.some((row) => row.status === 'failed' || row.status === 'needs_review') ? 'needs_review' : 'all');
+      // Phase 3: run batch analysis + export validation
+      const analyzedRows = validateBatch(runBatchAnalysis(rows, sessionCorrections));
+      setData(analyzedRows);
+      setBatchSessionRows(analyzedRows);
+      setBusinessCardFilter(analyzedRows.some((row) => row.status === 'failed' || row.status === 'needs_review') ? 'needs_review' : 'all');
       setStep('review');
 
       if (result.summary.failed > 0) {
@@ -1263,6 +1282,221 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
     await processSingleCardDraft(nextDraft);
   };
 
+  // ── Phase 3 handlers ───────────────────────────────────────────────────────
+
+  const handleAcceptReady = useCallback(() => {
+    setData((current) =>
+      current.map((card) => {
+        const c = card as BusinessCardEntry;
+        if (c.exportStatus === 'export_blocked' || c.exportStatus === 'export_warning') return card;
+        if (!c.needsReview) return card;
+        return { ...c, needsReview: false, status: 'complete' as const };
+      }),
+    );
+    setBusinessCardFilter('needs_review');
+    toast.success('Ready cards accepted.');
+  }, []);
+
+  const handleReviewNext = useCallback(() => {
+    const cards = data as BusinessCardEntry[];
+    const problemCards = cards.filter(
+      (c) =>
+        (c.needsReview || c.exportStatus === 'export_blocked' || c.duplicateStatus === 'possible') &&
+        !c.excludeFromExport,
+    );
+    if (problemCards.length === 0) {
+      toast.info('No more problem cards to review.');
+      return;
+    }
+    const currentIdx = focusedCardId
+      ? problemCards.findIndex((c) => c.id === focusedCardId)
+      : -1;
+    const next = problemCards[(currentIdx + 1) % problemCards.length];
+    setFocusedCardId(next.id);
+    setBusinessCardFilter('all');
+  }, [data, focusedCardId]);
+
+  const handleMarkReady = useCallback((cardId: string) => {
+    setData((current) =>
+      current.map((c) =>
+        c.id !== cardId
+          ? c
+          : {
+              ...c,
+              needsReview: false,
+              status: 'complete' as const,
+              exportStatus: 'ready_to_export' as const,
+              exportBlockedReasons: [],
+              exportWarningReasons: [],
+            },
+      ),
+    );
+  }, []);
+
+  const handleExcludeFromExport = useCallback((cardId: string) => {
+    setData((current) =>
+      current.map((c) =>
+        c.id !== cardId ? c : { ...c, excludeFromExport: !((c as BusinessCardEntry).excludeFromExport) },
+      ),
+    );
+  }, []);
+
+  const handleRestoreOriginal = useCallback((cardId: string) => {
+    setData((current) => {
+      const updated = current.map((c) => {
+        const card = c as BusinessCardEntry;
+        if (card.id !== cardId || !card.originalOcrValues) return c;
+        const restored: BusinessCardEntry = {
+          ...card,
+          ...card.originalOcrValues,
+          userEdited: new Set<keyof BusinessCardEntry>(),
+          originalOcrValues: undefined,
+        };
+        const [revalidated] = validateBatch([restored]);
+        return revalidated;
+      });
+      return updated;
+    });
+  }, []);
+
+  const handleMergeDuplicate = useCallback((cardId: string) => {
+    setData((current) =>
+      current.map((c) =>
+        c.id !== cardId
+          ? c
+          : { ...c, excludeFromExport: true, duplicateStatus: 'confirmed' as const },
+      ),
+    );
+    toast.success('Duplicate excluded from export.');
+  }, []);
+
+  const handleKeepBoth = useCallback((cardId: string) => {
+    setData((current) =>
+      current.map((c) =>
+        c.id !== cardId
+          ? c
+          : {
+              ...c,
+              duplicateStatus: 'ignored' as const,
+              duplicateOf: undefined,
+              warnings: ((c as BusinessCardEntry).warnings ?? []).filter(
+                (w) => !w.startsWith('duplicate_'),
+              ),
+            },
+      ),
+    );
+  }, []);
+
+  const handleIgnoreDuplicate = useCallback((cardId: string) => {
+    setData((current) =>
+      current.map((c) => {
+        const card = c as BusinessCardEntry;
+        if (card.id !== cardId) return c;
+        const filteredWarnings = (card.warnings ?? []).filter(
+          (w) => !w.startsWith('duplicate_'),
+        );
+        return {
+          ...card,
+          duplicateStatus: 'ignored' as const,
+          duplicateOf: undefined,
+          needsReview: filteredWarnings.length > 0 || card.needsReview
+            ? (filteredWarnings.length > 0)
+            : false,
+          warnings: filteredWarnings,
+        };
+      }),
+    );
+  }, []);
+
+  const handleApplyBatchCorrection = useCallback((rule: BatchCorrectionRule) => {
+    const newCorrections = addCorrectionRule(sessionCorrections, rule);
+    setSessionCorrections(newCorrections);
+    setData((current) => {
+      const analyzed = runBatchAnalysis(current as BusinessCardEntry[], newCorrections);
+      return validateBatch(analyzed);
+    });
+    // Clear matching suggestions
+    setBatchCorrectionSuggestions((prev) => {
+      const next = { ...prev };
+      for (const cardId of Object.keys(next)) {
+        next[cardId] = next[cardId].filter(
+          (s) => !(s.rule.type === rule.type && s.rule.pattern === rule.pattern),
+        );
+        if (next[cardId].length === 0) delete next[cardId];
+      }
+      return next;
+    });
+    toast.success(`Correction applied to matching cards.`);
+  }, [sessionCorrections]);
+
+  const handleDismissBatchCorrectionSuggestion = useCallback((cardId: string, ruleId: string) => {
+    setBatchCorrectionSuggestions((prev) => {
+      const filtered = (prev[cardId] ?? []).filter((s) => s.rule.id !== ruleId);
+      if (filtered.length === 0) {
+        const next = { ...prev };
+        delete next[cardId];
+        return next;
+      }
+      return { ...prev, [cardId]: filtered };
+    });
+  }, []);
+
+  const handleDataChange = useCallback((rows: BusinessCardEntry[]) => {
+    const cards = rows;
+    setData(cards);
+    // Rebuild correction suggestions for any user-edited company fields
+    const context = analyzeBatch(cards);
+    const suggestions: Record<string, BatchCorrectionSuggestion[]> = {};
+    for (const card of cards) {
+      if (!card.userEdited?.has('company') || !card.company) continue;
+      const cardSuggestions = buildBatchCorrectionSuggestions(
+        card,
+        card.company,
+        cards,
+        context,
+      );
+      if (cardSuggestions.length > 0) {
+        suggestions[card.id] = cardSuggestions;
+      }
+    }
+    if (Object.keys(suggestions).length > 0) {
+      setBatchCorrectionSuggestions(suggestions);
+    }
+  }, []);
+
+  // ── Export (Phase 3: preview before download) ─────────────────────────────
+
+  const doExport = useCallback((readyOnly: boolean) => {
+    setExportPreviewOpen(false);
+    const exportRows = data.filter((row) => row.status !== 'failed');
+    const filename = batchQueue.length > 1
+      ? `business-cards-batch-${new Date().toISOString().slice(0, 10)}`
+      : undefined;
+
+    selectedExportFormats.forEach((format) => {
+      exportData(exportRows, 'business-card', format, filename, undefined, {
+        includeColumns: selectedExportColumns,
+        readyCardsOnly: readyOnly,
+      });
+    });
+    toast.success(
+      `Exported ${selectedExportFormats.map((f) => f.toUpperCase()).join(', ')} successfully!`,
+    );
+
+    const settings = getSessionSettings();
+    if (settings.autoDeletePhotosAfterExport) {
+      void clearSession().catch(() => null);
+      persistedImageKeysRef.current.clear();
+      sessionIdRef.current = crypto.randomUUID();
+      sessionCreatedAtRef.current = new Date().toISOString();
+      clearBatchQueue();
+      setData([]);
+      setStep('capture');
+    } else {
+      toast.info('Export complete. You can continue uploading and keep building this session.');
+    }
+  }, [data, batchQueue.length, selectedExportFormats, selectedExportColumns, clearBatchQueue]);
+
   const handleExport = async () => {
     if (data.length === 0) {
       toast.error('No data to export');
@@ -1281,29 +1515,15 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
       return;
     }
 
-    const filename = batchQueue.length > 1
-      ? `business-cards-batch-${new Date().toISOString().slice(0, 10)}`
-      : undefined;
-
-    selectedExportFormats.forEach((format) => {
-      exportData(exportRows, 'business-card', format, filename, undefined, {
-        includeColumns: selectedExportColumns,
-      });
-    });
-    toast.success(`Exported ${selectedExportFormats.map((format) => format.toUpperCase()).join(', ')} successfully!`);
-
-    const settings = getSessionSettings();
-    if (settings.autoDeletePhotosAfterExport) {
-      await clearSession().catch(() => null);
-      persistedImageKeysRef.current.clear();
-      sessionIdRef.current = crypto.randomUUID();
-      sessionCreatedAtRef.current = new Date().toISOString();
-      clearBatchQueue();
-      setStep('capture');
+    // Phase 3: show preview when any blocked cards exist
+    const cards = exportRows as BusinessCardEntry[];
+    const hasBlocked = cards.some((c) => c.exportStatus === 'export_blocked' && !c.excludeFromExport);
+    if (hasBlocked) {
+      setExportPreviewOpen(true);
       return;
     }
 
-    toast.info('Export complete. You can continue uploading and keep building this session.');
+    doExport(false);
   };
 
   const queueCounts = useMemo(() => ({
@@ -1947,12 +2167,24 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
                 <DataReview
                   docType="business-card"
                   data={data}
-                  onChange={(rows) => setData(rows as BusinessCardEntry[])}
+                  onChange={(rows) => handleDataChange(rows as BusinessCardEntry[])}
                   businessCardFilter={businessCardFilter}
                   onBusinessCardFilterChange={setBusinessCardFilter}
                   onReviewProblemRows={() => setBusinessCardFilter('needs_review')}
                   onRetryFailed={retryFailedFromReview}
                   cardPreviewMap={cardPreviewMap}
+                  focusedCardId={focusedCardId}
+                  onAcceptReady={handleAcceptReady}
+                  onReviewNext={handleReviewNext}
+                  onMarkReady={handleMarkReady}
+                  onExcludeFromExport={handleExcludeFromExport}
+                  onRestoreOriginal={handleRestoreOriginal}
+                  onMergeDuplicate={handleMergeDuplicate}
+                  onKeepBoth={handleKeepBoth}
+                  onIgnoreDuplicate={handleIgnoreDuplicate}
+                  batchCorrectionSuggestions={batchCorrectionSuggestions}
+                  onApplyBatchCorrection={handleApplyBatchCorrection}
+                  onDismissBatchCorrectionSuggestion={handleDismissBatchCorrectionSuggestion}
                 />
               </div>
 
@@ -2015,6 +2247,14 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
           </div>
         )}
       </main>
+
+      {/* Phase 3: export preview modal */}
+      <ExportPreviewModal
+        open={exportPreviewOpen}
+        cards={data as BusinessCardEntry[]}
+        onConfirm={(readyOnly) => doExport(readyOnly)}
+        onCancel={() => setExportPreviewOpen(false)}
+      />
 
       {cropModalSource && (
         <CropModal

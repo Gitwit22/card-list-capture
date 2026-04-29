@@ -82,6 +82,18 @@ export interface BusinessCardEntry {
     height: number;
   };
   userEdited?: Set<keyof BusinessCardEntry>;
+  // Phase 3: Export readiness
+  exportStatus?: ExportStatus;
+  exportBlockedReasons?: string[];
+  exportWarningReasons?: string[];
+  excludeFromExport?: boolean;
+  // Phase 3: Candidate ranking
+  candidates?: CardCandidates;
+  // Phase 3: Duplicate detection
+  duplicateOf?: string;
+  duplicateStatus?: DuplicateStatus;
+  // Phase 3: Restore original OCR values (populated before first user edit)
+  originalOcrValues?: Partial<Pick<BusinessCardEntry, 'fullName' | 'firstName' | 'lastName' | 'company' | 'title' | 'phone' | 'email' | 'website' | 'address' | 'tagline'>>;
 }
 
 export type ScanMode = 'single-card' | 'multi-card';
@@ -109,6 +121,53 @@ export interface ScanRecord {
   meta?: ExtractionMeta;
   createdAt: Date;
 }
+
+// ─── Phase 3: Candidate ranking ───────────────────────────────────────────────
+export interface FieldCandidate {
+  value: string;
+  score: number;
+  sourceLine: string;
+  reasons: string[];
+  rejected: boolean;
+  rejectedReasons: string[];
+}
+
+export interface CardCandidates {
+  personName?: FieldCandidate[];
+  company?: FieldCandidate[];
+  title?: FieldCandidate[];
+  address?: FieldCandidate[];
+  website?: FieldCandidate[];
+  phone?: FieldCandidate[];
+  tagline?: FieldCandidate[];
+}
+
+// ─── Phase 3: Export readiness ────────────────────────────────────────────────
+export type ExportStatus = 'ready_to_export' | 'export_warning' | 'export_blocked';
+
+// ─── Phase 3: Batch correction memory ─────────────────────────────────────────
+export type BatchCorrectionType =
+  | 'domain_to_company'
+  | 'ignore_phrase'
+  | 'normalize_company'
+  | 'normalize_address'
+  | 'normalize_title';
+
+export interface BatchCorrectionRule {
+  id: string;
+  type: BatchCorrectionType;
+  pattern: string;
+  replacement?: string;
+  appliedCount: number;
+  createdAt: string;
+}
+
+export interface ScanSessionCorrections {
+  rules: BatchCorrectionRule[];
+}
+
+// ─── Phase 3: Duplicate tracking ──────────────────────────────────────────────
+export type DuplicateStatus = 'possible' | 'confirmed' | 'ignored';
 
 export type BatchItemStatus = 'queued' | 'processing' | 'done' | 'failed' | 'needs_review';
 

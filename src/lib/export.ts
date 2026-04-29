@@ -1,11 +1,14 @@
 import * as XLSX from 'xlsx';
 import { DocumentType, SignupEntry, BusinessCardEntry, ExtractionMeta } from '@/types/scan';
 import { buildSignupReviewModel } from '@/lib/reviewModel';
+import { humanizeExportReason } from '@/lib/exportValidation';
 
 export type ExportFormat = 'xlsx' | 'csv' | 'tsv' | 'json' | 'md';
 
 export interface ExportOptions {
   includeColumns?: string[];
+  /** When true, only export cards with exportStatus === 'ready_to_export' or 'export_warning' (excludes blocked + excluded) */
+  readyCardsOnly?: boolean;
 }
 
 export interface ExportColumnGroups {
@@ -103,6 +106,20 @@ function getExportPayload(
       'Warnings': normalizeCellValue((entry.warnings ?? []).join('; ')),
       'Back Text': normalizeCellValue(entry.backText || ''),
       'Notes': normalizeCellValue(entry.error || ''),
+      // Phase 3: export readiness
+      'Export Status': normalizeCellValue(
+        entry.exportStatus === 'ready_to_export' ? 'Ready'
+        : entry.exportStatus === 'export_warning' ? 'Warning'
+        : entry.exportStatus === 'export_blocked' ? 'Blocked'
+        : ''
+      ),
+      'Export Blocked Reasons': normalizeCellValue(
+        (entry.exportBlockedReasons ?? []).map(humanizeExportReason).join('; ')
+      ),
+      'Export Warnings': normalizeCellValue(
+        (entry.exportWarningReasons ?? []).map(humanizeExportReason).join('; ')
+      ),
+      'Excluded': entry.excludeFromExport ? 'yes' : '',
     };
 
     for (const key of extraKeys) {
@@ -179,6 +196,11 @@ const ADVANCED_BUSINESS_CARD_COLUMNS = new Set([
   'Conflict Fields',
   'Back Text',
   'serviceTags',
+  // Phase 3
+  'Export Status',
+  'Export Blocked Reasons',
+  'Export Warnings',
+  'Excluded',
 ]);
 
 function getDetectedColumns(rows: Record<string, string>[]): Set<string> {
@@ -287,7 +309,16 @@ export function exportData(
   meta?: ExtractionMeta,
   options?: ExportOptions,
 ) {
-  const { rows: payloadRows, defaultName, sheetName } = getExportPayload(data, docType, meta);
+  // Phase 3: filter to ready/warning cards when readyCardsOnly is set
+  const filteredData = (options?.readyCardsOnly && docType === 'business-card')
+    ? (data as BusinessCardEntry[]).filter((c) =>
+        !c.excludeFromExport &&
+        c.exportStatus !== 'export_blocked' &&
+        c.exportStatus !== undefined
+      )
+    : data;
+
+  const { rows: payloadRows, defaultName, sheetName } = getExportPayload(filteredData, docType, meta);
   const rows = filterRowsByColumns(payloadRows, options?.includeColumns);
   const baseName = filename || defaultName;
 
