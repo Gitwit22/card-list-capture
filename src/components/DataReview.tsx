@@ -50,6 +50,7 @@ function humanizeReason(reason: string): string {
   const map: Record<string, string> = {
     no_name_or_company: 'No name or company found',
     no_person_name: 'No person name found',
+    no_credible_name: 'No credible name detected — verify',
     low_confidence_name: 'Low-confidence name',
     low_confidence_company: 'Low-confidence company',
     website_contamination_cleaned: 'Website was cleaned (OCR junk removed)',
@@ -200,8 +201,7 @@ export function DataReview({
   ];
 
   const cardFields = [
-    { key: 'firstName', label: 'First Name' },
-    { key: 'lastName', label: 'Last Name' },
+    { key: 'fullName', label: 'Full Name' },
     { key: 'company', label: 'Company' },
     { key: 'title', label: 'Title' },
     { key: 'phone', label: 'Phone' },

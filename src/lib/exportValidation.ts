@@ -177,7 +177,9 @@ export function validateCardForExport(
   // ── No identifying info ───────────────────────────────────────────────────
   const hasName = Boolean(card.fullName?.trim() || card.firstName?.trim() || card.lastName?.trim());
   const hasCompany = Boolean(card.company?.trim());
-  if (!hasName && !hasCompany) {
+  const hasTitle = Boolean(card.title?.trim());
+  const hasIdentifying = hasName || hasCompany || hasTitle;
+  if (!hasIdentifying) {
     blockedReasons.push('no_identifying_info');
   }
 
@@ -222,12 +224,13 @@ export function validateCardForExport(
 
   // Missing contact method (no email + no phone + no website)
   const hasContact = Boolean(card.email?.trim() || card.phone?.trim() || card.website?.trim());
-  if ((hasName || hasCompany) && !hasContact) {
+  if (hasIdentifying && !hasContact) {
     warningReasons.push('no_contact_method');
   }
 
-  // Missing optional useful fields
-  if (!card.title?.trim()) warningReasons.push('missing_title');
+  // Title is a useful field, but less critical when a person name is already present.
+  // Only flag missing title when the card has no person name (e.g., org-only or brand cards).
+  if (!card.title?.trim() && !hasName) warningReasons.push('missing_title');
   if (!card.address?.trim()) warningReasons.push('missing_address');
 
   // Unresolved duplicate
@@ -245,8 +248,8 @@ export function validateCardForExport(
     return { status: 'export_blocked', blockedReasons, warningReasons };
   }
 
-  // Ready: has (name or company) AND at least one contact method
-  const isReady = (hasName || hasCompany) && hasContact;
+  // Ready: has identifying info (name, company, or title) AND at least one contact method
+  const isReady = hasIdentifying && hasContact;
   if (isReady && warningReasons.length === 0) {
     return { status: 'ready_to_export', blockedReasons: [], warningReasons: [] };
   }
@@ -329,7 +332,7 @@ export function humanizeExportReason(reason: string): string {
     company_is_placeholder: 'Company is a placeholder value',
     title_contains_ocr_paragraph: 'Title field contains OCR paragraph',
     title_is_placeholder: 'Title is a placeholder value',
-    no_identifying_info: 'No name or company found',
+    no_identifying_info: 'No name, company, or title found',
     extraction_failed: 'Extraction failed',
     low_confidence: 'Low OCR confidence',
     has_conflict_fields: 'Front/back card fields conflict',
