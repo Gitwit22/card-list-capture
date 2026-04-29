@@ -356,6 +356,87 @@ function isServiceDescriptionLine(line: string): boolean {
   return /^(specializing\s+in|providing\b|offering\b|serving\b|focusing\s+on|dedicated\s+to|committed\s+to)\b/i.test(line.trim());
 }
 
+// ─── Tagline / slogan patterns ────────────────────────────────────────────────
+// These lines are marketing copy and must never become person names or titles.
+const TAGLINE_OPENERS_RE = /^(specializing\s+in|no\s+matter\s+what|luxury\b|donations?\b|unpacking\b)/i;
+const TAGLINE_CONJUNCTION_RE = /[,&]\s*(and|or|&)\s|\bunpacking\b|\borganizing\b|\bdonations?\b/i;
+
+/**
+ * Return true when a line is a marketing tagline or slogan.
+ * Taglines are stored in extraFields.tagline and must never become firstName/lastName/title.
+ */
+function isTaglineLine(line: string): boolean {
+  const t = line.trim();
+  if (!t || t.length < 4) return false;
+  if (TAGLINE_OPENERS_RE.test(t)) return true;
+  // Phrase with commas/ampersands listing services (e.g. "Donations, Unpacking, & Organizing")
+  if (TAGLINE_CONJUNCTION_RE.test(t) && t.split(/\s+/).length >= 3) return true;
+  return false;
+}
+
+/**
+ * Field contamination helpers.
+ * Each returns the cleaned value (empty string if the whole value should be discarded).
+ */
+
+/** Reject a website value that looks like a full OCR paragraph (spaces, line breaks, sentences). */
+function sanitizeWebsite(value: string): string {
+  if (!value) return '';
+  // Multiple lines → try to extract first valid domain
+  if (/[\r\n]/.test(value)) {
+    const first = value.split(/[\r\n]+/)[0]?.trim() ?? '';
+    return cleanWebsite(first);
+  }
+  // Contains more than one space-separated segment that is NOT a path component
+  const spaceCount = (value.match(/ /g) ?? []).length;
+  if (spaceCount > 0) {
+    // Take only what looks like a domain — everything up to the first whitespace
+    return cleanWebsite(value.split(/\s/)[0] ?? '');
+  }
+  return value;
+}
+
+/** Reject a phone value that contains non-phone text (letters, HTML, address fragments). */
+function sanitizePhone(raw: string): string {
+  if (!raw) return '';
+  // Strip HTML tags first
+  const stripped = raw.replace(HTML_TAG_RE, '').replace(/&[a-z]+;/gi, '');
+  // If it looks like an address or has sentence-length text, discard
+  if (STREET_SUFFIX_RE.test(stripped) || PO_BOX_RE.test(stripped) || CITY_STATE_ZIP_RE.test(stripped)) return '';
+  // Count alpha characters: if more alpha than digit chars → probably text, not phone
+  const alphaCount = (stripped.match(/[a-zA-Z]/g) ?? []).length;
+  const digitCount = (stripped.match(/\d/g) ?? []).length;
+  if (alphaCount > digitCount) return '';
+  // Must have at least 10 digits
+  if (digitCount < 10) return '';
+  return stripped.trim();
+}
+
+/** Reject a title value that contains street/address patterns. */
+function sanitizeTitle(raw: string): { title: string; movedAddress: string } {
+  if (!raw) return { title: '', movedAddress: '' };
+  if (looksLikeAddress(raw) || CITY_STATE_ZIP_RE.test(raw) || PO_BOX_RE.test(raw)) {
+    return { title: '', movedAddress: raw };
+  }
+  if (NUMBERED_STREET_RE.test(raw)) {
+    return { title: '', movedAddress: raw };
+  }
+  return { title: raw, movedAddress: '' };
+}
+
+/** Reject a company value that looks like a street address; extract address fragment if present. */
+function sanitizeCompany(raw: string): { company: string; movedAddress: string } {
+  if (!raw) return { company: '', movedAddress: '' };
+  if (looksLikeAddress(raw) || PO_BOX_RE.test(raw) || CITY_STATE_ZIP_RE.test(raw)) {
+    return { company: '', movedAddress: raw };
+  }
+  if (SUITE_LINE_RE.test(raw)) {
+    return { company: '', movedAddress: raw };
+  }
+  return { company: raw, movedAddress: '' };
+}
+
+
 /**
  * Segment a concatenated domain-name segment into component words using DP.
  * "wonderworkingquarters" → ["wonder", "working", "quarters"]
@@ -470,6 +551,8 @@ function isPersonNameCandidate(line: string): boolean {
   if (COMPANY_ORG_KEYWORD_RE.test(trimmed)) return false;
   // Service/category lines must never become person names
   if (isServiceOrCategoryLine(trimmed)) return false;
+  // Tagline/slogan lines must never become person names
+  if (isTaglineLine(trimmed)) return false;
 
   // Strip credentials first to get just the name part
   const { name } = stripCredentials(trimmed);
@@ -516,6 +599,7 @@ export interface ResolvedCard {
   subtitle?: string;
   serviceCategory?: string;
   services?: string;
+  tagline?: string;
   inferredCompanySource?: 'domain';
   phone: string;
   fax?: string;
@@ -527,6 +611,8 @@ export interface ResolvedCard {
   warnings: string[];
   fieldConfidence?: ResolvedFieldConfidence;
   overallConfidence?: number;
+  needsReview: boolean;
+  reviewReasons: string[];
 }
 
 /**
@@ -782,12 +868,19 @@ export function resolveFromRawText(rawText: string): Partial<ResolvedCard> {
     index: number;
   }> = [];
   const serviceLines: string[] = [];
+  const taglineLines: string[] = [];
 
   for (let i = searchStart; i < lines.length; i++) {
     const line = lines[i];
     if (looksLikeEmail(line)) continue;
     if (looksLikePhone(line)) continue;
     if (looksLikeDomain(line)) continue;
+
+    // Tagline lines must not become names or titles; capture separately
+    if (isTaglineLine(line)) {
+      taglineLines.push(line);
+      continue;
+    }
 
     // Check honorific BEFORE address filter: "Dr." also matches STREET_SUFFIX_RE "dr" (drive).
     // Honorific lines are unambiguously person names, so promote them immediately.
@@ -826,6 +919,9 @@ export function resolveFromRawText(rawText: string): Partial<ResolvedCard> {
     nameLineIndex = best.index;
   }
 
+  // Derived tagline: first tagline line, or first service-description line
+  const tagline = taglineLines[0] ?? serviceLines.find(isServiceDescriptionLine) ?? '';
+
   // Categorise captured service lines
   const serviceCategory = serviceLines.find((l) => !isServiceDescriptionLine(l) && !/[,&]/.test(l)) ?? '';
   const services = serviceLines.filter((l) => isServiceDescriptionLine(l) || /[,&]/.test(l)).join(' ').trim();
@@ -850,6 +946,8 @@ export function resolveFromRawText(rawText: string): Partial<ResolvedCard> {
       if (looksLikeDomain(line)) break;
       if (looksLikeCityStateZip(line)) break;
       if (isOrgLine(line)) break;
+      // Taglines/slogans must not become title unless nothing else is available
+      if (isTaglineLine(line)) continue;
       // A title/subtitle line has alphabetic words
       if (/^[A-Za-z]/.test(line) && !/^\d/.test(line)) {
         if (!titleFound) {
@@ -871,18 +969,43 @@ export function resolveFromRawText(rawText: string): Partial<ResolvedCard> {
 
   // ── 10. Placeholder cleaning ──────────────────────────────────────────────
   // Clear any field that ended up as a known placeholder label (e.g. "Company").
-  const cleanCompany = isPlaceholder(company) ? '' : company;
+  const cleanCompany_raw = isPlaceholder(company) ? '' : company;
   const cleanFullName = isPlaceholder(fullName) ? '' : fullName;
-  const cleanTitle = isPlaceholder(title) ? '' : title;
-  const cleanPhone = isPlaceholder(phone) ? '' : phone;
+  const cleanTitle_raw = isPlaceholder(title) ? '' : title;
+  const cleanPhone_raw = isPlaceholder(phone) ? '' : phone;
   const cleanEmail = isPlaceholder(email) ? '' : email;
-  const cleanWebsiteVal = isPlaceholder(website) ? '' : website;
-  const cleanAddress = isPlaceholder(address) ? '' : address;
+  const cleanWebsite_raw = isPlaceholder(website) ? '' : website;
+  const cleanAddress_raw = isPlaceholder(address) ? '' : address;
 
   // When fullName resolves to a placeholder (e.g. "First Name"), clear firstName and lastName too.
   const fullNameWasPlaceholder = isPlaceholder(fullName);
   const cleanFirstName = (fullNameWasPlaceholder || isPlaceholder(firstName)) ? '' : firstName;
   const cleanLastName  = (fullNameWasPlaceholder || isPlaceholder(lastName))  ? '' : lastName;
+
+  // ── 10b. Field contamination cleanup ─────────────────────────────────────
+  // Website may not contain spaces, line breaks, or full OCR paragraphs.
+  const websiteContaminated = Boolean(cleanWebsite_raw && sanitizeWebsite(cleanWebsite_raw) !== cleanWebsite_raw);
+  const cleanWebsiteVal = sanitizeWebsite(cleanWebsite_raw);
+
+  // Phone may not contain letter-heavy or address-like text.
+  const phoneContaminated = Boolean(cleanPhone_raw && sanitizePhone(cleanPhone_raw) !== cleanPhone_raw);
+  const cleanPhone = sanitizePhone(cleanPhone_raw);
+
+  // Title must not contain street/address patterns — move to address if found.
+  const { title: cleanTitle_sanitized, movedAddress: titleMovedAddress } = sanitizeTitle(cleanTitle_raw);
+  const titleContaminated = Boolean(titleMovedAddress);
+  const cleanTitle = cleanTitle_sanitized;
+
+  // Company must not be a street address — move to address if found.
+  const { company: cleanCompany_sanitized, movedAddress: companyMovedAddress } = sanitizeCompany(cleanCompany_raw);
+  const companyContaminated = Boolean(companyMovedAddress);
+  const cleanCompany = cleanCompany_sanitized;
+
+  // If title or company had address fragments, merge them into the address field.
+  let cleanAddress = cleanAddress_raw;
+  if (!cleanAddress && (titleMovedAddress || companyMovedAddress)) {
+    cleanAddress = titleMovedAddress || companyMovedAddress;
+  }
 
   // ── 11. Per-field confidence scoring ─────────────────────────────────────
   const fieldConfidence: ResolvedFieldConfidence = {};
@@ -892,12 +1015,12 @@ export function resolveFromRawText(rawText: string): Partial<ResolvedCard> {
   }
 
   if (cleanWebsiteVal) {
-    fieldConfidence.website = 0.90;
+    fieldConfidence.website = websiteContaminated ? 0.60 : 0.90;
   }
 
   if (cleanPhone) {
     const hasLabel = nonFaxPairs.some((p) => p.label && !FAX_LABEL_RE.test(p.label));
-    fieldConfidence.phone = hasLabel ? 0.90 : 0.80;
+    fieldConfidence.phone = phoneContaminated ? 0.60 : (hasLabel ? 0.90 : 0.80);
   }
 
   if (cleanAddress) {
@@ -913,13 +1036,16 @@ export function resolveFromRawText(rawText: string): Partial<ResolvedCard> {
   }
 
   if (cleanCompany) {
-    switch (companySource) {
-      case 'org-hierarchy': fieldConfidence.company = 0.90; break;
-      case 'stacked-caps':  fieldConfidence.company = 0.85; break;
-      case 'single-caps':   fieldConfidence.company = 0.80; break;
-      case 'domain':        fieldConfidence.company = 0.50; break;
-      default:              fieldConfidence.company = 0.70; break;
-    }
+    const baseConf = (() => {
+      switch (companySource) {
+        case 'org-hierarchy': return 0.90;
+        case 'stacked-caps':  return 0.85;
+        case 'single-caps':   return 0.80;
+        case 'domain':        return 0.50;
+        default:              return 0.70;
+      }
+    })();
+    fieldConfidence.company = companyContaminated ? 0.50 : baseConf;
   }
 
   if (cleanFullName) {
@@ -940,13 +1066,28 @@ export function resolveFromRawText(rawText: string): Partial<ResolvedCard> {
   }
 
   if (cleanTitle && cleanTitle !== credentials) {
-    fieldConfidence.title = TITLE_ROLE_KEYWORDS.test(cleanTitle) ? 0.85 : 0.70;
+    fieldConfidence.title = titleContaminated ? 0.50 : (TITLE_ROLE_KEYWORDS.test(cleanTitle) ? 0.85 : 0.70);
   }
 
   const confidenceValues = Object.values(fieldConfidence).filter((v): v is number => v !== undefined);
   const overallConfidence = confidenceValues.length > 0
     ? confidenceValues.reduce((a, b) => a + b, 0) / confidenceValues.length
     : 0;
+
+  // ── 12. Compute needsReview + reviewReasons ──────────────────────────────
+  const reviewReasons: string[] = [];
+
+  if (!cleanFullName && !cleanCompany) reviewReasons.push('no_name_or_company');
+  if (!cleanFullName && cleanCompany) reviewReasons.push('no_person_name');
+  if ((fieldConfidence.firstName ?? 1) < 0.65) reviewReasons.push('low_confidence_name');
+  if ((fieldConfidence.company ?? 1) < 0.60) reviewReasons.push('low_confidence_company');
+  if (websiteContaminated) reviewReasons.push('website_contamination_cleaned');
+  if (phoneContaminated) reviewReasons.push('phone_contamination_cleaned');
+  if (titleContaminated) reviewReasons.push('title_address_moved');
+  if (companyContaminated) reviewReasons.push('company_address_moved');
+  if (nameCandidates.length > 2) reviewReasons.push('multiple_name_candidates');
+
+  const needsReview = reviewReasons.length > 0;
 
   return {
     fullName: cleanFullName,
@@ -960,6 +1101,7 @@ export function resolveFromRawText(rawText: string): Partial<ResolvedCard> {
     ...(subtitle !== undefined && { subtitle }),
     ...(serviceCategory ? { serviceCategory } : {}),
     ...(services ? { services } : {}),
+    ...(tagline ? { tagline } : {}),
     ...(inferredCompanySource ? { inferredCompanySource } : {}),
     phone: cleanPhone,
     ...(fax ? { fax } : {}),
@@ -971,5 +1113,7 @@ export function resolveFromRawText(rawText: string): Partial<ResolvedCard> {
     warnings,
     fieldConfidence,
     overallConfidence,
+    needsReview,
+    reviewReasons,
   };
 }

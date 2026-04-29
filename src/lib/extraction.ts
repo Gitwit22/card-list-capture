@@ -1882,6 +1882,18 @@ function mapBusinessCard(card: Record<string, unknown>): BusinessCardEntry {
   if (resolved.inferredCompanySource) {
     resolverExtras['inferredCompanySource'] = resolved.inferredCompanySource;
   }
+  if (resolved.tagline) {
+    resolverExtras['tagline'] = resolved.tagline;
+  }
+
+  // ── Build needsReview / confidence from resolver signals ──────────────────
+  const resolverNeedsReview = resolved.needsReview ?? false;
+  const resolverReviewReasons = resolved.reviewReasons ?? [];
+  const resolverConfidence = resolved.overallConfidence ?? 0;
+  const resolverFieldConfidence = resolved.fieldConfidence;
+
+  // Combine any review reasons from both API and resolver passes
+  const finalWarnings = [...(resolved.warnings ?? []), ...(resolverReviewReasons)];
 
   return {
     id: String(card.id ?? crypto.randomUUID()),
@@ -1899,6 +1911,11 @@ function mapBusinessCard(card: Record<string, unknown>): BusinessCardEntry {
     comment: asCleanString(card.comment),
     extraFields: { ...resolverExtras, ...extraFields },
     rawText: rawTextStr,
+    needsReview: resolverNeedsReview,
+    confidence: resolverConfidence,
+    fieldConfidence: resolverFieldConfidence,
+    warnings: finalWarnings.length > 0 ? finalWarnings : undefined,
+    status: resolverNeedsReview ? 'needs_review' : 'complete',
   };
 }
 

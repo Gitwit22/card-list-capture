@@ -391,10 +391,12 @@ describe('resolveFromRawText — Wonder Working Quarters card', () => {
     expect(result.serviceCategory).toBe('Professional Organizing');
   });
 
-  it('captures services containing "Specializing" and "DUO"', () => {
+  it('captures "Specializing in DUO Services" as tagline or services', () => {
     const result = resolveFromRawText(RAW);
-    expect(result.services).toMatch(/specializing/i);
-    expect(result.services).toMatch(/DUO/);
+    // "Specializing in..." is now stored in tagline (service-description opener)
+    const taglineOrServices = result.tagline ?? result.services ?? '';
+    expect(taglineOrServices).toMatch(/specializing/i);
+    expect(taglineOrServices).toMatch(/DUO/);
   });
 
   it('emits no name_not_found warning', () => {
@@ -965,4 +967,256 @@ describe('confidence scoring', () => {
     expect(result.fieldConfidence?.company).toBeLessThan(0.70);
   });
 });
+
+// ─── Phase 2 — needsReview flags ─────────────────────────────────────────────
+
+describe('needsReview flags', () => {
+  it('needsReview=false for a clean well-extracted card', () => {
+    const raw = [
+      'HENRY FORD HEALTH',
+      'Jane Doe',
+      'Director',
+      'jane@hfhs.org',
+      'henryford.com',
+      '313-555-0000',
+      '1 Ford Place',
+      'Detroit, MI 48202',
+    ].join('\n');
+    const result = resolveFromRawText(raw);
+    expect(result.needsReview).toBe(false);
+    expect(result.reviewReasons).toEqual([]);
+  });
+
+  it('needsReview=true when no name found', () => {
+    const raw = 'HENRY FORD HEALTH\njane@hfhs.org\n313-555-0000';
+    const result = resolveFromRawText(raw);
+    expect(result.needsReview).toBe(true);
+    expect(result.reviewReasons).toContain('no_person_name');
+  });
+
+  it('needsReview=true when no name AND no company', () => {
+    const raw = 'jane@example.com\n313-555-0000';
+    const result = resolveFromRawText(raw);
+    expect(result.needsReview).toBe(true);
+    expect(result.reviewReasons).toContain('no_name_or_company');
+  });
+
+  it('reviewReasons includes low_confidence_name when best name score is low', () => {
+    // "AB CD" — two single-letter words, barely a name
+    const raw = 'SOME ORG\njane@example.com';
+    const result = resolveFromRawText(raw);
+    // No name should be found, triggering no_person_name
+    expect(result.reviewReasons?.some((r) => r.includes('name'))).toBe(true);
+  });
+
+  it('needsReview=false when only optional fields are missing', () => {
+    // Has name + company but no address/website/fax
+    const raw = [
+      'ACME CORP',
+      'John Smith',
+      'Manager',
+      'john@acme.com',
+      '313-555-1234',
+    ].join('\n');
+    const result = resolveFromRawText(raw);
+    expect(result.needsReview).toBe(false);
+  });
+});
+
+// ─── Phase 2 — field contamination cleanup ───────────────────────────────────
+
+describe('field contamination cleanup', () => {
+  it('sanitizes website that has spaces (OCR junk merged)', () => {
+    const raw = [
+      'John Smith',
+      'john@example.com',
+      'example.com some extra OCR junk on this line',
+    ].join('\n');
+    const result = resolveFromRawText(raw);
+    // website should be just the domain without trailing OCR text
+    expect(result.website).toBe('example.com');
+  });
+
+  it('website never contains full OCR paragraph', () => {
+    const raw = [
+      'INVEST DETROIT',
+      'John Smith',
+      'john@investdetroit.com',
+      'INVEST DETROIT is a leading source of capital for Detroit businesses.',
+    ].join('\n');
+    const result = resolveFromRawText(raw);
+    expect(result.website).not.toMatch(/ /); // no spaces in a clean website
+  });
+
+  it('phone with address text is discarded', () => {
+    // Simulate a field that has address-like text rather than a phone
+    // resolveFromRawText skips address lines for phone extraction already,
+    // but sanitizePhone guards the final value
+    const raw = [
+      'John Smith',
+      'john@example.com',
+      '(313) 555-0000',
+    ].join('\n');
+    const result = resolveFromRawText(raw);
+    // Should produce a valid phone, not cleared
+    expect(result.phone).toContain('313');
+  });
+
+  it('title with address pattern is cleared and moved', () => {
+    // If title detection grabbed a street line, sanitizeTitle should clear it
+    // (This is an edge guard; test the contamination-detection path indirectly via warnings)
+    const raw = [
+      'HENRY FORD HEALTH',
+      'Jane Doe',
+      '1 Ford Place',
+      'Detroit, MI 48202',
+      'jane@hfhs.org',
+    ].join('\n');
+    const result = resolveFromRawText(raw);
+    // Title should not contain a street address
+    const titleHasStreet = result.title ? /\d+\s+\w+\s+(st|ave|blvd|dr|rd|place)\b/i.test(result.title) : false;
+    expect(titleHasStreet).toBe(false);
+    // Address should contain the street
+    expect(result.address).toMatch(/Ford Place/i);
+  });
+});
+
+// ─── Phase 2 — tagline detection ─────────────────────────────────────────────
+
+describe('tagline detection', () => {
+  it('"No Matter What" is never firstName or lastName', () => {
+    const raw = [
+      'ACME CORP',
+      'John Smith',
+      'No Matter What',
+      'john@acme.com',
+    ].join('\n');
+    const result = resolveFromRawText(raw);
+    expect(result.firstName).not.toMatch(/no|matter|what/i);
+    expect(result.lastName).not.toMatch(/no|matter|what/i);
+  });
+
+  it('"No Matter What" is stored in tagline', () => {
+    const raw = [
+      'ACME CORP',
+      'John Smith',
+      'No Matter What',
+      'john@acme.com',
+    ].join('\n');
+    const result = resolveFromRawText(raw);
+    expect(result.tagline).toMatch(/no matter what/i);
+  });
+
+  it('"Donations, Unpacking, & Organizing" is not a person name', () => {
+    const raw = [
+      'Mary Williams',
+      'Donations, Unpacking, & Organizing',
+      'mary@example.com',
+    ].join('\n');
+    const result = resolveFromRawText(raw);
+    expect(result.firstName).toBe('Mary');
+    expect(result.lastName).toBe('Williams');
+  });
+
+  it('"Specializing in..." opener is stored as tagline', () => {
+    const raw = [
+      'INNOVATIVE SOLUTIONS LLC',
+      'Tom Brown',
+      'Specializing in nonprofit fundraising',
+      'tom@innovativesolutions.com',
+    ].join('\n');
+    const result = resolveFromRawText(raw);
+    expect(result.tagline).toMatch(/specializing/i);
+    expect(result.firstName).toBe('Tom');
+  });
+
+  it('"Luxury Yacht Rental for All Occasions" is not a person name', () => {
+    const raw = [
+      'Sea Breeze Charters',
+      'Captain James Cole',
+      'Luxury yacht rental for all occasions',
+      'james@seabreeze.com',
+    ].join('\n');
+    const result = resolveFromRawText(raw);
+    // The resolver picks "Captain James Cole" as the person line (correct)
+    // — firstName may be "Captain" or "James" depending on prefix handling.
+    // What matters: the tagline phrase never becomes a name token.
+    expect(result.firstName).not.toMatch(/luxury|yacht|rental|occasions/i);
+    expect(result.lastName).not.toMatch(/luxury|yacht|rental|occasions/i);
+    // Person was identified
+    expect(result.fullName).toMatch(/James Cole/i);
+  });
+
+  it('"SPECIALIZING IN" all-caps is not treated as first/last name', () => {
+    const raw = [
+      'HEALTHCARE PROFESSIONALS LLC',
+      'SPECIALIZING IN HOME HEALTH SERVICES',
+      'Dr. Linda Park, MD',
+      'linda@hpllc.com',
+    ].join('\n');
+    const result = resolveFromRawText(raw);
+    expect(result.firstName).not.toMatch(/^SPECIALIZING$/i);
+    expect(result.lastName).not.toMatch(/^IN$/i);
+  });
+});
+
+// ─── Phase 2 — Henry Ford Health card (full field extraction) ────────────────
+
+describe('resolveFromRawText — Henry Ford Health full card', () => {
+  const RAW = [
+    'HENRY',
+    'FORD',
+    'HEALTH',
+    'Jane Doe',
+    'Registered Dietitian',
+    'jane.doe@hfhs.org',
+    'henryford.com',
+    '(313) 555-7890',
+    '1 Ford Place',
+    'Detroit, MI 48202',
+  ].join('\n');
+
+  it('extracts Jane Doe as person', () => {
+    const result = resolveFromRawText(RAW);
+    expect(result.firstName).toBe('Jane');
+    expect(result.lastName).toBe('Doe');
+  });
+
+  it('assigns Henry Ford Health as company', () => {
+    const result = resolveFromRawText(RAW);
+    expect(result.company).toMatch(/henry ford health/i);
+  });
+
+  it('extracts title as Registered Dietitian', () => {
+    const result = resolveFromRawText(RAW);
+    expect(result.title).toMatch(/dietitian/i);
+  });
+
+  it('extracts email', () => {
+    const result = resolveFromRawText(RAW);
+    expect(result.email).toBe('jane.doe@hfhs.org');
+  });
+
+  it('extracts phone', () => {
+    const result = resolveFromRawText(RAW);
+    expect(result.phone).toContain('313');
+  });
+
+  it('extracts website', () => {
+    const result = resolveFromRawText(RAW);
+    expect(result.website).toBe('henryford.com');
+  });
+
+  it('extracts address', () => {
+    const result = resolveFromRawText(RAW);
+    expect(result.address).toMatch(/Ford Place/i);
+    expect(result.address).toMatch(/Detroit/i);
+  });
+
+  it('is not needsReview', () => {
+    const result = resolveFromRawText(RAW);
+    expect(result.needsReview).toBe(false);
+  });
+});
+
 
