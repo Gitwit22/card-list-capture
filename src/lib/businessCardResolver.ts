@@ -47,11 +47,18 @@ const SERVICE_WORDS = new Set([
 // ─── Organization-line detection ──────────────────────────────────────────────
 // Lines matching these patterns should never become person names.
 const ORG_LINE_PREFIXES = /^(state of|city of|county of|office of|department of|ministry of|bureau of|university of|republic of|province of)\b/i;
+// Governmental / institutional keywords used in org-hierarchy detection.
 const ORG_LINE_KEYWORDS = /\b(department|county|township|parish|borough|city of|university|ministry|ministries|church|office of|government|bureau|division|authority|commission|tribunal|district|legislature|senate|house of representatives|representatives|congress)\b/i;
 
 // Org-indicator keywords present in mixed-case company / org names.
 // A line containing any of these must never be treated as a person name.
+// Some keywords intentionally overlap with ORG_LINE_KEYWORDS: they serve
+// separate roles — ORG_LINE_KEYWORDS drives org-hierarchy stacking while
+// COMPANY_ORG_KEYWORD_RE guards name-candidate filtering for mixed-case lines.
 const COMPANY_ORG_KEYWORD_RE = /\b(inc\.?|llc\.?|ltd\.?|corp\.?|foundation|police|league|fundraising|senate|legislature|representatives|ministries|nonprofit|associates|authority|commission|council)\b/i;
+
+// ─── Shared P.O. Box pattern ─────────────────────────────────────────────────
+const PO_BOX_RE = /^P\.?\s*O\.?\s*Box/i;
 
 function isOrgLine(line: string): boolean {
   const trimmed = line.trim();
@@ -218,7 +225,7 @@ function looksLikeDomain(line: string): boolean {
 }
 
 function looksLikeAddress(line: string): boolean {
-  return STREET_SUFFIX_RE.test(line) || /^P\.?\s*O\.?\s*Box/i.test(line) || ZIP_RE.test(line) || CITY_STATE_ZIP_RE.test(line);
+  return STREET_SUFFIX_RE.test(line) || PO_BOX_RE.test(line) || ZIP_RE.test(line) || CITY_STATE_ZIP_RE.test(line);
 }
 
 function looksLikeCityStateZip(line: string): boolean {
@@ -456,7 +463,7 @@ function isPersonNameCandidate(line: string): boolean {
   if (looksLikeCityStateZip(trimmed)) return false;
   if (isBareState(trimmed)) return false;
   if (ZIP_RE.test(trimmed)) return false;
-  if (/^P\.?\s*O\.?\s*Box/i.test(trimmed)) return false;
+  if (PO_BOX_RE.test(trimmed)) return false;
   // Organization lines must never become person names
   if (isOrgLine(trimmed)) return false;
   // Lines with company/org suffix keywords must never become person names
@@ -614,7 +621,7 @@ export function resolveFromRawText(rawText: string): Partial<ResolvedCard> {
     // Second pass: any street suffix match (e.g. P.O. Box, "Elm Place")
     if (streetIdx < 0) {
       for (let i = 0; i < lines.length; i++) {
-        if (/^P\.?\s*O\.?\s*Box/i.test(lines[i]) || STREET_SUFFIX_RE.test(lines[i])) {
+        if (PO_BOX_RE.test(lines[i]) || STREET_SUFFIX_RE.test(lines[i])) {
           streetIdx = i;
           break;
         }
@@ -627,7 +634,7 @@ export function resolveFromRawText(rawText: string): Partial<ResolvedCard> {
 
       // Look back one line for a building/place name or a street line preceding a P.O. Box.
       const prev = lines[streetIdx - 1] ?? '';
-      const isPOBoxAnchor = /^P\.?\s*O\.?\s*Box/i.test(anchor);
+      const isPOBoxAnchor = PO_BOX_RE.test(anchor);
       if (prev && !looksLikeEmail(prev) && !looksLikePhone(prev) && !looksLikeCityStateZip(prev) && !PHONE_LABEL_RE.test(prev) && !looksLikeDomain(prev)) {
         if (isPOBoxAnchor && (NUMBERED_STREET_RE.test(prev) || STREET_SUFFIX_RE.test(prev))) {
           // Street line precedes a P.O. Box — include it as the first address part
@@ -651,14 +658,14 @@ export function resolveFromRawText(rawText: string): Partial<ResolvedCard> {
         }
       } else if (CITY_STATE_ZIP_RE.test(next1)) {
         parts.push(next1);
-      } else if (/^P\.?\s*O\.?\s*Box/i.test(next1)) {
+      } else if (PO_BOX_RE.test(next1)) {
         // P.O. Box follows the street line — include it and look for city/state/ZIP
         parts.push(next1);
         if (CITY_STATE_ZIP_RE.test(next2)) {
           parts.push(next2);
         } else if (CITY_STATE_ZIP_RE.test(next3)) {
-          parts.push(next2); // intermediate line (e.g. second address line)
-          parts.push(next3);
+          parts.push(next2); // intermediate line between P.O. Box and city/state/ZIP
+          parts.push(next3); // city/state/ZIP
         }
       } else if (next1 && ZIP_RE.test(next1) && !CITY_STATE_ZIP_RE.test(next1)) {
         // ZIP-only on next line (rare) — just include it
@@ -873,9 +880,9 @@ export function resolveFromRawText(rawText: string): Partial<ResolvedCard> {
   const cleanAddress = isPlaceholder(address) ? '' : address;
 
   // When fullName resolves to a placeholder (e.g. "First Name"), clear firstName and lastName too.
-  const fnameWasPlaceholder = isPlaceholder(fullName);
-  const cleanFirstName = (fnameWasPlaceholder || isPlaceholder(firstName)) ? '' : firstName;
-  const cleanLastName  = (fnameWasPlaceholder || isPlaceholder(lastName))  ? '' : lastName;
+  const fullNameWasPlaceholder = isPlaceholder(fullName);
+  const cleanFirstName = (fullNameWasPlaceholder || isPlaceholder(firstName)) ? '' : firstName;
+  const cleanLastName  = (fullNameWasPlaceholder || isPlaceholder(lastName))  ? '' : lastName;
 
   // ── 11. Per-field confidence scoring ─────────────────────────────────────
   const fieldConfidence: ResolvedFieldConfidence = {};
@@ -896,7 +903,7 @@ export function resolveFromRawText(rawText: string): Partial<ResolvedCard> {
   if (cleanAddress) {
     const addressLines = cleanAddress.split('\n');
     const hasStreet = addressLines.some(
-      (l) => NUMBERED_STREET_RE.test(l) || STREET_SUFFIX_RE.test(l) || /^P\.?\s*O\.?\s*Box/i.test(l),
+      (l) => NUMBERED_STREET_RE.test(l) || STREET_SUFFIX_RE.test(l) || PO_BOX_RE.test(l),
     );
     const hasCityZip = addressLines.some((l) => CITY_STATE_ZIP_RE.test(l.trim()));
     if (hasStreet && hasCityZip) fieldConfidence.address = 0.90;

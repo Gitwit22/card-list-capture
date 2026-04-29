@@ -440,6 +440,9 @@ describe('placeholder cleaning', () => {
     const result = resolveFromRawText(raw);
     expect(result.company).not.toBe('Company');
     expect(result.company).not.toBe('company');
+    // Company should be empty (no non-placeholder org data) or inferred from the email domain
+    const validCompany = !result.company || result.company.toLowerCase() !== 'company';
+    expect(validCompany).toBe(true);
   });
 
   it('does not return "Email" as email', () => {
