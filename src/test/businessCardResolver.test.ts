@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { resolveFromRawText, cleanWebsite } from '@/lib/businessCardResolver';
+import { resolveFromRawText, cleanWebsite, inferCompanyFromDomain } from '@/lib/businessCardResolver';
 
 // ─── cleanWebsite ─────────────────────────────────────────────────────────────
 
@@ -325,5 +325,109 @@ describe('resolveFromRawText — Michigan DHHS card', () => {
     expect(result.warnings).not.toContain('name_not_found');
     expect(result.warnings).not.toContain('company_not_found');
     expect(result.warnings).not.toContain('fax_promoted_as_phone');
+  });
+});
+
+// ─── Wonder Working Quarters card ─────────────────────────────────────────────
+
+describe('resolveFromRawText — Wonder Working Quarters card', () => {
+  const RAW = [
+    'Professional Organizing',
+    'Specializing in DUO Services -',
+    'Donations, Unpacking, & Organizing',
+    '',
+    'Christine Smith-Johnson',
+    'Owner/Organizing Strategist',
+    '',
+    'Phone (313) 433-5452',
+    'christine@wonderworkingquarters.com',
+    'www.wonderworkingquarters.com',
+  ].join('\n');
+
+  it('extracts Christine Smith-Johnson as fullName', () => {
+    const result = resolveFromRawText(RAW);
+    expect(result.fullName).toBe('Christine Smith-Johnson');
+  });
+
+  it('splits first and last name correctly', () => {
+    const result = resolveFromRawText(RAW);
+    expect(result.firstName).toBe('Christine');
+    expect(result.lastName).toBe('Smith-Johnson');
+  });
+
+  it('does NOT use "Professional Organizing" as person name', () => {
+    const result = resolveFromRawText(RAW);
+    expect(result.fullName).not.toMatch(/professional|organizing/i);
+  });
+
+  it('extracts phone containing area code 313', () => {
+    const result = resolveFromRawText(RAW);
+    expect(result.phone).toMatch(/313/);
+  });
+
+  it('extracts email', () => {
+    const result = resolveFromRawText(RAW);
+    expect(result.email).toBe('christine@wonderworkingquarters.com');
+  });
+
+  it('extracts website', () => {
+    const result = resolveFromRawText(RAW);
+    expect(result.website).toBe('wonderworkingquarters.com');
+  });
+
+  it('infers company from domain', () => {
+    const result = resolveFromRawText(RAW);
+    // Domain "wonderworkingquarters.com" should segment to "Wonder Working Quarters"
+    expect(result.company).toMatch(/wonder|working|quarters/i);
+  });
+
+  it('marks inferredCompanySource as domain', () => {
+    const result = resolveFromRawText(RAW);
+    expect(result.inferredCompanySource).toBe('domain');
+  });
+
+  it('captures serviceCategory as "Professional Organizing"', () => {
+    const result = resolveFromRawText(RAW);
+    expect(result.serviceCategory).toBe('Professional Organizing');
+  });
+
+  it('captures services containing "Specializing" and "DUO"', () => {
+    const result = resolveFromRawText(RAW);
+    expect(result.services).toMatch(/specializing/i);
+    expect(result.services).toMatch(/DUO/);
+  });
+
+  it('emits no name_not_found warning', () => {
+    const result = resolveFromRawText(RAW);
+    expect(result.warnings).not.toContain('name_not_found');
+  });
+});
+
+// ─── inferCompanyFromDomain unit tests ───────────────────────────────────────
+
+describe('inferCompanyFromDomain', () => {
+  it('segments wonderworkingquarters.com → Wonder Working Quarters', () => {
+    expect(inferCompanyFromDomain('wonderworkingquarters.com')).toBe('Wonder Working Quarters');
+  });
+
+  it('handles hyphenated domains', () => {
+    expect(inferCompanyFromDomain('wonder-working-quarters.com')).toBe('Wonder Working Quarters');
+  });
+
+  it('returns empty string for generic gmail domain', () => {
+    expect(inferCompanyFromDomain('gmail.com')).toBe('');
+  });
+
+  it('returns empty string for yahoo.com', () => {
+    expect(inferCompanyFromDomain('yahoo.com')).toBe('');
+  });
+
+  it('returns empty string for empty input', () => {
+    expect(inferCompanyFromDomain('')).toBe('');
+  });
+
+  it('segments nxttechsolutions.com using known words', () => {
+    const result = inferCompanyFromDomain('nxttechsolutions.com');
+    expect(result).toMatch(/nxt|tech|solutions/i);
   });
 });

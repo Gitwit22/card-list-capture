@@ -1817,8 +1817,16 @@ function mapBusinessCard(card: Record<string, unknown>): BusinessCardEntry {
   // For company: prefer structured API result.
   // Only use resolver's company when there was NO company data from the API at all
   // (i.e., not when resolveBusinessCardCompany explicitly rejected a candidate).
+  // Exception: if the API result is a short all-caps acronym (e.g., "DUO") or
+  // the resolver inferred a proper name via domain segmentation, prefer that.
   const hadApiCompanyData = Boolean(mapped.organization || fallbackCompany);
-  const finalCompany = resolvedCompany || (!hadApiCompanyData ? resolved.company ?? '' : '') || '';
+  const apiCompanyIsWeak = resolvedCompany.length > 0 && resolvedCompany.length <= 5 && /^[A-Z]+$/.test(resolvedCompany);
+  // Domain-inferred company is a reliable signal — allow it through even when
+  // the API supplied company data, provided the API result was weak or empty.
+  const domainInferredCompany = resolved.inferredCompanySource === 'domain' ? (resolved.company ?? '') : '';
+  const finalCompany = (resolvedCompany && !apiCompanyIsWeak)
+    ? resolvedCompany
+    : domainInferredCompany || resolvedCompany || (!hadApiCompanyData ? resolved.company ?? '' : '') || '';
 
   // For fullName: prefer structured API result UNLESS it looks like an org name,
   // in which case fall back to the resolver's name.
@@ -1860,6 +1868,15 @@ function mapBusinessCard(card: Record<string, unknown>): BusinessCardEntry {
   }
   if (resolved.subtitle) {
     resolverExtras['subtitle'] = resolved.subtitle;
+  }
+  if (resolved.serviceCategory) {
+    resolverExtras['serviceCategory'] = resolved.serviceCategory;
+  }
+  if (resolved.services) {
+    resolverExtras['services'] = resolved.services;
+  }
+  if (resolved.inferredCompanySource) {
+    resolverExtras['inferredCompanySource'] = resolved.inferredCompanySource;
   }
 
   return {

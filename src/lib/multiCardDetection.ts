@@ -78,7 +78,7 @@ export interface MultiCardDetectionOptions {
   minAreaPercent?: number;
 }
 
-type CandidateOrigin = 'component' | 'merge' | 'split' | 'manual' | 'contour' | 'expanded' | 'cluster-fallback';
+type CandidateOrigin = 'component' | 'merge' | 'split' | 'manual' | 'contour' | 'expanded' | 'cluster-fallback' | 'grid_gap_rescue';
 
 interface ComponentBox {
   x: number;
@@ -1671,6 +1671,190 @@ function expandCandidateToFullCard(
   };
 }
 
+/**
+ * Find the position (row or column index) of the dominant background gap band
+ * in the middle 20–80 % of the image. Used by the grid rescue pass to locate
+ * the natural split between a 2×2 card layout's rows or columns.
+ *
+ * Returns -1 when no meaningful gap is found (all band fractions are low).
+ */
+function findPrimaryGap(
+  sceneBackgroundMask: Uint8Array,
+  width: number,
+  height: number,
+  direction: 'horizontal' | 'vertical',
+): number {
+  const size = direction === 'horizontal' ? height : width;
+  const crossSize = direction === 'horizontal' ? width : height;
+
+  // Compute per-band background fraction
+  const raw = new Float32Array(size);
+  for (let i = 0; i < size; i += 1) {
+    let bgCount = 0;
+    for (let j = 0; j < crossSize; j += 1) {
+      const idx = direction === 'horizontal' ? i * width + j : j * width + i;
+      bgCount += sceneBackgroundMask[idx];
+    }
+    raw[i] = bgCount / crossSize;
+  }
+
+  // Smooth ± 5 bands
+  const smoothed = new Float32Array(size);
+  for (let i = 0; i < size; i += 1) {
+    let sum = 0;
+    let count = 0;
+    for (let d = -5; d <= 5; d += 1) {
+      const idx = i + d;
+      if (idx < 0 || idx >= size) continue;
+      sum += raw[idx];
+      count += 1;
+    }
+    smoothed[i] = sum / Math.max(1, count);
+  }
+
+  // Find maximum in middle 20–80 %
+  const lo = Math.floor(size * 0.20);
+  const hi = Math.floor(size * 0.80);
+  let bestPos = -1;
+  let bestVal = 0.35; // minimum threshold to be considered a gap
+
+  for (let i = lo; i <= hi; i += 1) {
+    if (smoothed[i] > bestVal) {
+      bestVal = smoothed[i];
+      bestPos = i;
+    }
+  }
+
+  return bestPos;
+}
+
+/**
+ * Background-grid rescue pass for images where 4 cards are arranged in a 2×2
+ * grid. When fewer cards than expected were found, divide the image at its
+ * dominant background gap lines and create a candidate for each grid cell not
+ * already covered by an accepted crop.
+ *
+ * Only runs when `recommendedMax >= 4` and fewer than `recommendedMax` cards
+ * have been accepted so far.
+ */
+function runBackgroundGridRescue(
+  sceneBackgroundMask: Uint8Array,
+  foregroundMask: Uint8Array,
+  denoisedGray: Uint8Array,
+  edges: Uint8Array,
+  workWidth: number,
+  workHeight: number,
+  scale: number,
+  naturalWidth: number,
+  naturalHeight: number,
+  acceptedSoFar: DetectionCandidate[],
+  recommendedMax: number,
+  minAreaPercent: number,
+  nextIndex: number,
+): DetectionCandidate[] {
+  const GRID_RESCUE_MIN_SCORE = 0.20;
+  const COVERAGE_OVERLAP_THRESHOLD = 0.35;
+
+  // Find split lines
+  const midY = findPrimaryGap(sceneBackgroundMask, workWidth, workHeight, 'horizontal');
+  const midX = findPrimaryGap(sceneBackgroundMask, workWidth, workHeight, 'vertical');
+
+  // Fall back to image centre when no gap found
+  const splitY = midY > 0 ? midY : Math.floor(workHeight / 2);
+  const splitX = midX > 0 ? midX : Math.floor(workWidth / 2);
+
+  console.debug(`[gridRescue] splitX=${splitX} splitY=${splitY} (midX=${midX} midY=${midY})`);
+
+  const cells: Array<{ x: number; y: number; w: number; h: number; label: string }> = [
+    { x: 0,      y: 0,      w: splitX,           h: splitY,            label: 'TL' },
+    { x: splitX, y: 0,      w: workWidth - splitX, h: splitY,          label: 'TR' },
+    { x: 0,      y: splitY, w: splitX,           h: workHeight - splitY, label: 'BL' },
+    { x: splitX, y: splitY, w: workWidth - splitX, h: workHeight - splitY, label: 'BR' },
+  ];
+
+  const rescued: DetectionCandidate[] = [];
+
+  for (const cell of cells) {
+    if (cell.w < 10 || cell.h < 10) continue;
+
+    // Check if this cell is already well covered by an accepted candidate
+    const cellBox: ComponentBox = { x: cell.x, y: cell.y, width: cell.w, height: cell.h, pixels: 0 };
+    const isCovered = acceptedSoFar.some(
+      (a) => getIoU(cellBox, a.box) >= COVERAGE_OVERLAP_THRESHOLD,
+    );
+    if (isCovered) {
+      console.debug(`[gridRescue] ${cell.label}: already covered`);
+      continue;
+    }
+
+    // Compute foreground density in this cell
+    let fgPixels = 0;
+    for (let y = cell.y; y < cell.y + cell.h; y += 1) {
+      const rowOffset = y * workWidth;
+      for (let x = cell.x; x < cell.x + cell.w; x += 1) {
+        fgPixels += foregroundMask[rowOffset + x];
+      }
+    }
+    const cellArea = cell.w * cell.h;
+    const fgDensity = fgPixels / Math.max(1, cellArea);
+
+    if (fgDensity < 0.03) {
+      console.debug(`[gridRescue] ${cell.label}: skipped — too little foreground (${(fgDensity * 100).toFixed(1)} %)`);
+      continue;
+    }
+
+    // Tighten to foreground bounding box within the cell
+    let minX = cell.x + cell.w - 1;
+    let maxX = cell.x;
+    let minY = cell.y + cell.h - 1;
+    let maxY = cell.y;
+
+    for (let y = cell.y; y < cell.y + cell.h; y += 1) {
+      const rowOffset = y * workWidth;
+      for (let x = cell.x; x < cell.x + cell.w; x += 1) {
+        if (foregroundMask[rowOffset + x]) {
+          if (x < minX) minX = x;
+          if (x > maxX) maxX = x;
+          if (y < minY) minY = y;
+          if (y > maxY) maxY = y;
+        }
+      }
+    }
+
+    if (minX > maxX || minY > maxY) continue;
+
+    const tightBox: ComponentBox = {
+      x: minX,
+      y: minY,
+      width: maxX - minX + 1,
+      height: maxY - minY + 1,
+      pixels: fgPixels,
+    };
+
+    const expandedBox = expandCandidateToFullCard(tightBox, sceneBackgroundMask, workWidth, workHeight);
+    const metrics = measureCandidateMetrics(expandedBox, denoisedGray, edges, foregroundMask, workWidth, workHeight);
+    const assessment = assessCandidate(expandedBox, metrics, workWidth, workHeight, minAreaPercent);
+
+    const rescueScore = assessment.score;
+    const accepted = rescueScore >= GRID_RESCUE_MIN_SCORE;
+
+    console.debug(`[gridRescue] ${cell.label}: score=${rescueScore.toFixed(3)} accepted=${accepted} reason=${assessment.reason}`);
+
+    if (!accepted) continue;
+
+    rescued.push({
+      index: nextIndex + rescued.length,
+      box: expandedBox,
+      bounds: componentToBounds(expandedBox, scale, naturalWidth, naturalHeight),
+      generatedBy: 'grid_gap_rescue',
+      assessment: { ...assessment, accepted: true, reason: 'grid_gap_rescue' },
+      metrics,
+    });
+  }
+
+  return rescued;
+}
+
 function shouldAttemptExpansion(
   box: ComponentBox,
   metrics: CandidateMetrics,
@@ -2103,7 +2287,43 @@ export async function detectBusinessCardCrops(
     }
   }
 
-  const allAccepted = [...suppression.accepted, ...rescued];
+  // ── Background-grid rescue (2×2 layout fallback) ──────────────────────────
+  // When fewer cards than expected are found and recommendedMax >= 4, divide
+  // the image at background-gap lines and create candidates for uncovered cells.
+  const gridRescued: DetectionCandidate[] = [];
+
+  if (
+    recommendedMax >= 4
+    && (suppression.accepted.length + rescued.length) < recommendedMax
+  ) {
+    const nextIdx = suppression.accepted.length + rescued.length + 100_000;
+    const gridCandidates = runBackgroundGridRescue(
+      sceneBackgroundMask,
+      foregroundMask,
+      denoisedGray,
+      edges,
+      workWidth,
+      workHeight,
+      scale,
+      image.naturalWidth,
+      image.naturalHeight,
+      [...suppression.accepted, ...rescued],
+      recommendedMax,
+      minAreaPercent,
+      nextIdx,
+    );
+    for (const gc of gridCandidates) {
+      const overlaps = [...suppression.accepted, ...rescued, ...gridRescued].some(
+        (a) => getIoU(a.box, gc.box) >= 0.25,
+      );
+      if (!overlaps) gridRescued.push(gc);
+    }
+    if (gridRescued.length > 0) {
+      warnings.push(`Grid rescue found ${gridRescued.length} additional card region(s) for ${recommendedMax}-card layout.`);
+    }
+  }
+
+  const allAccepted = [...suppression.accepted, ...rescued, ...gridRescued];
 
   const cleanedAccepted = sortReadingOrder(nonMaximumSuppression(
     allAccepted.map((candidate) => candidate.box),
@@ -2132,6 +2352,10 @@ export async function detectBusinessCardCrops(
       candidate,
       reason: 'rescued',
     })),
+    ...gridRescued.map((candidate) => ({
+      candidate,
+      reason: 'grid_gap_rescue',
+    })),
   ];
 
   const candidateSeen = new Set<string>();
@@ -2143,8 +2367,8 @@ export async function detectBusinessCardCrops(
       return true;
     })
     .map(({ candidate, reason }) => {
-      const accepted = reason === 'accepted' || reason === 'rescued';
-      const isRescued = reason === 'rescued';
+      const accepted = reason === 'accepted' || reason === 'rescued' || reason === 'grid_gap_rescue';
+      const isRescued = reason === 'rescued' || reason === 'grid_gap_rescue';
       const candidateKey = `${candidate.index}:${computeBoxSignature(candidate.box)}:${candidate.generatedBy}`;
       return {
         index: candidate.index,
@@ -2160,7 +2384,7 @@ export async function detectBusinessCardCrops(
         rectangularity: Number(candidate.metrics.rectangularity.toFixed(3)),
         edgeScore: Number(candidate.metrics.borderEdgeDensity.toFixed(3)),
         rescueEligible: rescuedSet.has(candidateKey) || candidate.assessment.score >= rescueMinScore,
-        ...(isRescued && { rescuedBy: 'post_suppression_rescue' }),
+        ...(isRescued && { rescuedBy: reason === 'grid_gap_rescue' ? 'grid_gap_rescue' : 'post_suppression_rescue' }),
       } satisfies DetectionCandidateDebug;
     });
 

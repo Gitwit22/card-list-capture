@@ -81,6 +81,80 @@ const PHONE_RE = /(?:\+?\d[\d\s()./-]{7,}\d)/g;
 const PHONE_LABEL_RE = /\b(mobile|cell|office|work|fax|direct|main|hq|toll\s*free|phone|tel|telephone)\b/i;
 const FAX_LABEL_RE = /\bfax\b/i;
 
+// ─── Generic email domains (domain name ≠ company name) ──────────────────────
+const GENERIC_EMAIL_DOMAINS = new Set([
+  'gmail.com', 'yahoo.com', 'outlook.com', 'hotmail.com', 'icloud.com',
+  'aol.com', 'proton.me', 'protonmail.com', 'live.com', 'msn.com',
+  'me.com', 'mac.com', 'comcast.net', 'att.net', 'verizon.net',
+  'sbcglobal.net', 'bellsouth.net', 'cox.net', 'earthlink.net',
+  'ymail.com', 'inbox.com', 'mail.com', 'zoho.com',
+]);
+
+// ─── Service adjectives: pair with a service noun → category heading ──────────
+const SERVICE_ADJECTIVES = new Set([
+  'professional', 'commercial', 'residential', 'mobile', 'expert', 'certified',
+  'licensed', 'general', 'premier', 'custom', 'advanced', 'elite', 'specialized',
+  'independent', 'private', 'affordable', 'trusted', 'reliable', 'quality',
+]);
+
+// ─── Service activity words: gerunds, trade nouns, activity descriptors ───────
+const SERVICE_ACTIVITY_WORDS = new Set([
+  // Gerunds
+  'organizing', 'cleaning', 'landscaping', 'painting', 'roofing', 'plumbing',
+  'consulting', 'accounting', 'bookkeeping', 'tutoring', 'bartending',
+  'catering', 'mowing', 'hauling', 'moving', 'remodeling', 'renovating',
+  'designing', 'recruiting', 'staffing', 'planning', 'decorating', 'styling',
+  'transporting', 'delivering', 'coaching', 'training', 'counseling',
+  'barbering', 'installing', 'repairing', 'maintaining', 'notarizing',
+  'appraising', 'staging', 'waxing', 'grooming', 'baking', 'brewing',
+  'dispatching', 'contracting', 'facilitating', 'mediating',
+  // Service nouns
+  'photography', 'videography', 'notary', 'construction', 'carpentry',
+  'electrical', 'flooring', 'massage', 'esthetics', 'cosmetology',
+  'transportation', 'logistics',
+]);
+
+// ─── Domain segmentation word list ────────────────────────────────────────────
+// Used to split concatenated domain names into readable words.
+// e.g., "wonderworkingquarters" → ["wonder", "working", "quarters"]
+const DOMAIN_SEGMENT_WORDS = new Set([
+  'a', 'able', 'ace', 'act', 'active', 'add', 'advance', 'aerial', 'after',
+  'ahead', 'aid', 'air', 'all', 'alliance', 'alpha', 'am', 'amp', 'an',
+  'angle', 'apex', 'app', 'art', 'artisan', 'arts', 'at', 'auto', 'avenue',
+  'back', 'balance', 'bank', 'base', 'bay', 'bear', 'beauty', 'best', 'better',
+  'beyond', 'big', 'black', 'blue', 'bold', 'bond', 'brand', 'bridge',
+  'bright', 'build', 'business', 'call', 'capital', 'card', 'care', 'cash',
+  'center', 'central', 'chief', 'choice', 'city', 'clean', 'clear', 'close',
+  'cloud', 'co', 'coast', 'com', 'connect', 'core', 'corner', 'craft',
+  'create', 'creative', 'cross', 'custom', 'data', 'day', 'deal', 'deck',
+  'deep', 'delta', 'design', 'digital', 'direct', 'do', 'down', 'dream',
+  'drive', 'duo', 'east', 'easy', 'edge', 'elite', 'embrace', 'empire',
+  'enable', 'energy', 'engage', 'enterprise', 'envision', 'era', 'estate',
+  'ever', 'expert', 'express', 'fair', 'finance', 'fine', 'first', 'fit',
+  'flex', 'flow', 'focus', 'ford', 'force', 'forge', 'forward', 'foundation',
+  'fresh', 'frontier', 'full', 'gem', 'global', 'goal', 'gold', 'good',
+  'grace', 'grand', 'great', 'green', 'grid', 'group', 'grow', 'guide',
+  'gulf', 'haven', 'health', 'heart', 'help', 'heritage', 'high', 'home',
+  'horizon', 'house', 'hub', 'idea', 'ideal', 'impact', 'in', 'insight',
+  'inspire', 'it', 'key', 'kind', 'lab', 'lane', 'leap', 'level', 'light',
+  'link', 'lion', 'live', 'local', 'logic', 'long', 'main', 'make', 'market',
+  'max', 'media', 'metro', 'mid', 'mind', 'mix', 'mobile', 'modern', 'motion',
+  'net', 'network', 'new', 'next', 'north', 'nxt', 'oak', 'office', 'one',
+  'open', 'out', 'over', 'peak', 'people', 'pinnacle', 'place', 'plan',
+  'play', 'plus', 'point', 'potential', 'power', 'premier', 'prime', 'pro',
+  'profile', 'progress', 'provide', 'pure', 'quarters', 'quest', 'quality',
+  'reach', 'realty', 'red', 'rise', 'river', 'road', 'rock', 'safe', 'sage',
+  'scale', 'set', 'sharp', 'shine', 'sky', 'smart', 'smile', 'south',
+  'space', 'spark', 'spirit', 'square', 'star', 'start', 'step', 'sterling',
+  'stone', 'stream', 'stride', 'strong', 'style', 'summit', 'swift', 'sys',
+  'system', 'systems', 'tech', 'team', 'the', 'thrive', 'tide', 'tip', 'top',
+  'total', 'touch', 'trust', 'two', 'united', 'up', 'urban', 'us', 'value',
+  'venture', 'view', 'vision', 'water', 'way', 'well', 'west', 'wild', 'wing',
+  'wonder', 'wonderful', 'working', 'world', 'worth', 'work', 'works',
+  'solutions', 'services', 'henry', 'price', 'miller', 'johnson', 'clark',
+  'xcel', 'yard', 'year', 'your', 'zeal', 'zen', 'zone',
+]);
+
 // ─── Email pattern ────────────────────────────────────────────────────────────
 const EMAIL_RE = /[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}/gi;
 
@@ -213,6 +287,143 @@ export function cleanWebsite(raw: string): string {
 }
 
 /**
+ * Returns true when a line looks like a service/category heading or marketing
+ * copy — something that should never be treated as a person name.
+ *
+ * Catches patterns such as:
+ *   "Professional Organizing"      — service adjective + service gerund
+ *   "Mobile Bartending"            — service adjective + service gerund
+ *   "Photography"                  — single service word
+ *   "Specializing in DUO Services" — service description opener
+ *   "Cleaning Services"            — service gerund + "services"
+ */
+function isServiceOrCategoryLine(line: string): boolean {
+  const t = line.trim();
+  if (!t) return false;
+
+  // Service description openers
+  if (/^(specializing\s+in|providing\b|offering\b|serving\b|focusing\s+on|dedicated\s+to|committed\s+to)\b/i.test(t)) return true;
+
+  const words = t.split(/\s+/).filter(Boolean);
+  if (words.length === 0 || words.length > 6) return false;
+  const lowers = words.map((w) => w.toLowerCase().replace(/[^a-z]/g, ''));
+
+  // Single service/activity word
+  if (words.length === 1) {
+    return SERVICE_WORDS.has(lowers[0]) || SERVICE_ACTIVITY_WORDS.has(lowers[0]);
+  }
+
+  // 2-word: service-adjective + service-word, or service-word + service-word
+  if (words.length === 2) {
+    const [w0, w1] = lowers;
+    if (SERVICE_ADJECTIVES.has(w0) && (SERVICE_ACTIVITY_WORDS.has(w1) || SERVICE_WORDS.has(w1))) return true;
+    if (SERVICE_ACTIVITY_WORDS.has(w0) && (SERVICE_WORDS.has(w1) || SERVICE_ACTIVITY_WORDS.has(w1))) return true;
+  }
+
+  // Multi-word: ≥ 60 % service/activity words
+  const serviceHits = lowers.filter(
+    (w) => SERVICE_WORDS.has(w) || SERVICE_ACTIVITY_WORDS.has(w) || SERVICE_ADJECTIVES.has(w),
+  ).length;
+  if (words.length >= 2 && serviceHits >= Math.ceil(words.length * 0.6)) return true;
+
+  return false;
+}
+
+/** Returns true for marketing-description openers ("Specializing in…", etc.). */
+function isServiceDescriptionLine(line: string): boolean {
+  return /^(specializing\s+in|providing\b|offering\b|serving\b|focusing\s+on|dedicated\s+to|committed\s+to)\b/i.test(line.trim());
+}
+
+/**
+ * Segment a concatenated domain-name segment into component words using DP.
+ * "wonderworkingquarters" → ["wonder", "working", "quarters"]
+ * Returns null when clean segmentation is not possible.
+ */
+function segmentDomainName(domain: string): string[] | null {
+  const s = domain.toLowerCase().replace(/[^a-z]/g, '');
+  if (!s) return null;
+  const n = s.length;
+  const dp: (string[] | null)[] = new Array(n + 1).fill(null);
+  dp[0] = [];
+  for (let i = 1; i <= n; i++) {
+    for (let len = Math.min(i, 15); len >= 3; len--) {
+      const word = s.slice(i - len, i);
+      if (DOMAIN_SEGMENT_WORDS.has(word) && dp[i - len] !== null) {
+        dp[i] = [...dp[i - len]!, word];
+        break;
+      }
+    }
+  }
+  return dp[n];
+}
+
+/**
+ * Attempt to derive a readable company name from a domain string.
+ * "wonderworkingquarters.com" → "Wonder Working Quarters"
+ * Returns '' for generic email domains or unresolvable inputs.
+ */
+export function inferCompanyFromDomain(domain: string): string {
+  if (!domain) return '';
+  const d = domain.trim().toLowerCase();
+  if (GENERIC_EMAIL_DOMAINS.has(d)) return '';
+  const base = d.split('.')[0] ?? '';
+  if (!base || base.length < 4) return '';
+  // Hyphenated domain: "wonder-working-quarters" → "Wonder Working Quarters"
+  if (base.includes('-')) {
+    return base.split('-').filter(Boolean)
+      .map((p) => p.charAt(0).toUpperCase() + p.slice(1))
+      .join(' ');
+  }
+  // Word segmentation: only use result when ≥ 2 recognisable words are found.
+  // Skip the fallback title-case path — single-word or unrecognised domains
+  // (e.g. "brionprice", "fair") should not produce a company name.
+  const words = segmentDomainName(base);
+  if (words && words.length >= 2) {
+    return words.map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+  }
+  return '';
+}
+
+/**
+ * Score a person-name candidate line. Higher = more likely to be a real person.
+ * Used to select the best name when multiple lines pass candidate checks.
+ */
+function scoreNameCandidate(name: string, emailLocalPart: string): number {
+  const words = name.trim().split(/\s+/).filter(Boolean);
+  let score = 1; // base for passing all checks
+
+  // Hyphenated last-name format (e.g., Smith-Johnson)
+  if (words.some((w) => /^[A-Z][a-z]+-[A-Z][a-z]+$/.test(w))) score += 4;
+
+  // Every word is properly capitalised
+  if (words.every((w) => /^[A-Z][a-z.'-]*$/.test(w) || /^[A-Z][a-z]+-[A-Z][a-z]+$/.test(w))) score += 2;
+
+  // Email local part overlaps with a name word (e.g., "christine" matches "Christine")
+  if (emailLocalPart) {
+    const emailNorm = emailLocalPart.toLowerCase().replace(/[^a-z]/g, '');
+    const nameParts = words.map((w) => w.toLowerCase().replace(/[^a-z]/g, ''));
+    if (
+      emailNorm.length >= 3
+      && nameParts.some(
+        (p) => p.length >= 3 && (emailNorm.startsWith(p) || emailNorm.includes(p) || p.includes(emailNorm)),
+      )
+    ) {
+      score += 5;
+    }
+  }
+
+  // Penalise lines containing service words
+  const lowers = words.map((w) => w.toLowerCase().replace(/[^a-z]/g, ''));
+  const serviceHits = lowers.filter((w) => SERVICE_WORDS.has(w) || SERVICE_ACTIVITY_WORDS.has(w)).length;
+  score -= serviceHits * 2;
+
+  // Penalise lines containing job-title keywords (likely a title, not a name)
+  if (TITLE_ROLE_KEYWORDS.test(name)) score -= 3;
+
+  return score;
+}
+
+/**
  * Check if a line is a valid person name candidate.
  *
  *  - Organization lines (STATE OF, DEPARTMENT, COUNTY, etc.) are rejected.
@@ -233,6 +444,8 @@ function isPersonNameCandidate(line: string): boolean {
   if (/^P\.?\s*O\.?\s*Box/i.test(trimmed)) return false;
   // Organization lines must never become person names
   if (isOrgLine(trimmed)) return false;
+  // Service/category lines must never become person names
+  if (isServiceOrCategoryLine(trimmed)) return false;
 
   // Strip credentials first to get just the name part
   const { name } = stripCredentials(trimmed);
@@ -266,6 +479,9 @@ export interface ResolvedCard {
   organizationUnit?: string;
   title: string;
   subtitle?: string;
+  serviceCategory?: string;
+  services?: string;
+  inferredCompanySource?: 'domain';
   phone: string;
   fax?: string;
   otherPhones: string[];
@@ -483,45 +699,78 @@ export function resolveFromRawText(rawText: string): Partial<ResolvedCard> {
     }
   }
 
-  // ── 6. Find person name ───────────────────────────────────────────────────
+  // ── Domain-derived company fallback ─────────────────────────────────────
+  let inferredCompanySource: 'domain' | undefined;
+  if (!company) {
+    const domainToTry = website || (email ? email.split('@')[1] ?? '' : '');
+    const inferred = inferCompanyFromDomain(domainToTry);
+    if (inferred) {
+      company = inferred;
+      inferredCompanySource = 'domain';
+    }
+  }
+
+  // ── 6. Find person name (scored collection) ───────────────────────────────
+  // Collect ALL passing candidates, score them, pick the best.
+  // Service/category lines are captured for serviceCategory/services fields.
   let fullName = '';
   let credentials = '';
   let nameLineIndex = -1;
 
   const searchStart = companyEndIndex + 1;
+  const emailLocalPart = email ? email.split('@')[0] : '';
 
-  // Honorific fast-path: a line starting with Mr./Ms./Dr./etc. is unambiguously a name
+  const nameCandidates: Array<{
+    credParsed: ReturnType<typeof stripCredentials>;
+    score: number;
+    index: number;
+  }> = [];
+  const serviceLines: string[] = [];
+
   for (let i = searchStart; i < lines.length; i++) {
-    if (hasHonorific(lines[i])) {
-      const stripped = stripCredentials(lines[i]);
-      fullName = stripped.name;
-      credentials = stripped.credentials.join(', ');
-      nameLineIndex = i;
-      break;
+    const line = lines[i];
+    if (looksLikeEmail(line)) continue;
+    if (looksLikePhone(line)) continue;
+    if (looksLikeDomain(line)) continue;
+    if (looksLikeAddress(line)) continue;
+    if (looksLikeCityStateZip(line)) continue;
+    if (isBareState(line)) continue;
+    if (PHONE_LABEL_RE.test(line) && looksLikePhone(line.replace(PHONE_LABEL_RE, '').trim())) continue;
+    if (FAX_LABEL_RE.test(line) && looksLikePhone(line.replace(FAX_LABEL_RE, '').trim())) continue;
+
+    // Service/category lines → captured for output, never used as name
+    if (isServiceOrCategoryLine(line)) {
+      serviceLines.push(line);
+      continue;
     }
-  }
 
-  // Fallback: scan for first isPersonNameCandidate match after company block
-  if (!fullName) {
-    for (let i = searchStart; i < lines.length; i++) {
-      const line = lines[i];
-      if (looksLikeEmail(line)) continue;
-      if (looksLikePhone(line)) continue;
-      if (looksLikeDomain(line)) continue;
-      if (looksLikeAddress(line)) continue;
-      if (looksLikeCityStateZip(line)) continue;
-      if (isBareState(line)) continue;
-      if (PHONE_LABEL_RE.test(line) && looksLikePhone(line.replace(PHONE_LABEL_RE, '').trim())) continue;
+    // Honorific fast-path: unambiguous person name
+    if (hasHonorific(line)) {
+      const credParsed = stripCredentials(line);
+      nameCandidates.push({ credParsed, score: 10, index: i });
+      continue;
+    }
 
-      if (isPersonNameCandidate(line)) {
-        const stripped = stripCredentials(line);
-        fullName = stripped.name;
-        credentials = stripped.credentials.join(', ');
-        nameLineIndex = i;
-        break;
+    if (isPersonNameCandidate(line)) {
+      const credParsed = stripCredentials(line);
+      const score = scoreNameCandidate(credParsed.name, emailLocalPart);
+      if (score >= 0) {
+        nameCandidates.push({ credParsed, score, index: i });
       }
     }
   }
+
+  if (nameCandidates.length > 0) {
+    nameCandidates.sort((a, b) => b.score - a.score);
+    const best = nameCandidates[0];
+    fullName = best.credParsed.name;
+    credentials = best.credParsed.credentials.join(', ');
+    nameLineIndex = best.index;
+  }
+
+  // Categorise captured service lines
+  const serviceCategory = serviceLines.find((l) => !isServiceDescriptionLine(l) && !/[,&]/.test(l)) ?? '';
+  const services = serviceLines.filter((l) => isServiceDescriptionLine(l) || /[,&]/.test(l)).join(' ').trim();
 
   // ── 7. Split first/last name ──────────────────────────────────────────────
   const nameParts = fullName.trim().split(/\s+/).filter(Boolean);
@@ -572,6 +821,9 @@ export function resolveFromRawText(rawText: string): Partial<ResolvedCard> {
     ...(organizationUnit !== undefined && { organizationUnit }),
     title,
     ...(subtitle !== undefined && { subtitle }),
+    ...(serviceCategory ? { serviceCategory } : {}),
+    ...(services ? { services } : {}),
+    ...(inferredCompanySource ? { inferredCompanySource } : {}),
     phone,
     ...(fax ? { fax } : {}),
     otherPhones,
