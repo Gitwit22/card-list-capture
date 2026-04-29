@@ -228,7 +228,8 @@ export function validateCardForExport(
     warningReasons.push('no_contact_method');
   }
 
-  // Missing optional useful fields — only warn on title if there's no other context
+  // Title is a useful field, but less critical when a person name is already present.
+  // Only flag missing title when the card has no person name (e.g., org-only or brand cards).
   if (!card.title?.trim() && !hasName) warningReasons.push('missing_title');
   if (!card.address?.trim()) warningReasons.push('missing_address');
 

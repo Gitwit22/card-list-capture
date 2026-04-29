@@ -923,14 +923,15 @@ export function resolveFromRawText(rawText: string): Partial<ResolvedCard> {
   if (nameCandidates.length > 0) {
     nameCandidates.sort((a, b) => b.score - a.score);
     const best = nameCandidates[0];
-    // Only accept a candidate when confidence is sufficient (maps to >= 0.75 field confidence).
-    // score >= 5 → 0.85 confidence; score < 5 (score 1–4) → 0.70, which is below the 0.75 threshold.
+    // Only accept a candidate when its confidence is sufficient.
+    // score >= 5  → firstName: 0.85, lastName: 0.80 (above the 0.75 threshold — accepted)
+    // score 1–4  → firstName: 0.70, lastName: 0.65 (below the 0.75 threshold — rejected)
     if (best.score >= 5) {
       fullName = best.credParsed.name;
       credentials = best.credParsed.credentials.join(', ');
       nameLineIndex = best.index;
     }
-    // If we had candidates but none were credible enough, record this for review.
+    // If we had candidates but none were credible enough, no_credible_name is added below.
   }
 
   // Derived tagline: first tagline line, or first service-description line
@@ -1089,7 +1090,8 @@ export function resolveFromRawText(rawText: string): Partial<ResolvedCard> {
 
   if (!cleanFullName && !cleanCompany) reviewReasons.push('no_name_or_company');
   if (!cleanFullName && cleanCompany) reviewReasons.push('no_person_name');
-  // Flag when there were name candidates but none had sufficient confidence
+  // no_credible_name: name candidates were found but all scored below the acceptance threshold (< 5).
+  // This is distinct from no_name_or_company/no_person_name where no candidates existed at all.
   if (!cleanFullName && nameCandidates.length > 0) reviewReasons.push('no_credible_name');
   // Use 0 as default so absent confidence (no name/company found) correctly triggers the flag.
   if (cleanFullName && (fieldConfidence.firstName ?? 0) < 0.65) reviewReasons.push('low_confidence_name');
