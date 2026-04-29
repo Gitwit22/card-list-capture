@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { FileSpreadsheet, CreditCard, ArrowLeft, Download, Loader2, ScanLine, History } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { ImageCapture } from '@/components/ImageCapture';
 import { DataReview } from '@/components/DataReview';
@@ -13,8 +14,9 @@ import { toast } from 'sonner';
 type Step = 'home' | 'capture' | 'processing' | 'review' | 'history';
 
 const Index = () => {
+  const navigate = useNavigate();
   const [step, setStep] = useState<Step>('home');
-  const [docType, setDocType] = useState<DocumentType>('business-card');
+  const [docType, setDocType] = useState<DocumentType>('signup-sheet');
   const [imageFile, setImageFile] = useState<File | null>(null);
   const [imageUrl, setImageUrl] = useState<string>('');
   const [data, setData] = useState<(SignupEntry | BusinessCardEntry)[]>([]);
@@ -136,7 +138,7 @@ const Index = () => {
               </button>
 
               <button
-                onClick={() => selectType('business-card')}
+                onClick={() => navigate('/business-cards')}
                 className="group p-6 rounded-xl bg-card border border-border card-shadow hover:card-shadow-hover hover:border-primary/30 transition-all text-left"
               >
                 <div className="w-12 h-12 rounded-xl bg-accent/10 flex items-center justify-center mb-4 group-hover:bg-accent/15 transition-colors">
