@@ -9,7 +9,7 @@ import {
   SignupEntry,
 } from '@/types/scan';
 import { getConfig } from '@/config/env';
-import { resolveFromRawText } from '@/lib/businessCardResolver';
+import { resolveFromRawText, isPlaceholder } from '@/lib/businessCardResolver';
 
 interface SigninProcessResponse {
   status: string;
@@ -1749,44 +1749,48 @@ function mapBusinessCard(card: Record<string, unknown>): BusinessCardEntry {
   const mapped = mapDynamicRow(mergedSource, { includeComments: false });
   const usedKeys = new Set(mapped.usedNormalizedKeys);
 
-  const fallbackFullName =
-    asCleanString(card.fullName)
-    || asCleanString(card.name)
-    || asCleanString(card.contactName)
-    || asCleanString(card.person);
-  const fallbackCompany =
-    asCleanString(card.company)
-    || asCleanString(card.organization)
-    || asCleanString(card.org)
-    || asCleanString(card.companyName)
-    || asCleanString(card.business);
-  const fallbackTitle =
-    asCleanString(card.title)
-    || asCleanString(card.jobTitle)
-    || asCleanString(card.position)
-    || asCleanString(card.role);
-  const fallbackPhone =
-    asCleanString(card.phone)
-    || asCleanString(card.phoneNumber)
-    || asCleanString(card.mobile)
-    || asCleanString(card.tel);
-  const fallbackEmail =
-    asCleanString(card.email)
-    || asCleanString(card.emailAddress)
-    || asCleanString(card.mail);
-  const fallbackWebsite =
-    asCleanString(card.website)
-    || asCleanString(card.url)
-    || asCleanString(card.web);
-  const fallbackAddress =
-    asCleanString(card.address)
-    || asCleanString(card.mailingAddress)
-    || asCleanString(card.streetAddress);
+  // Helper: return empty string when the API echoes back a placeholder label
+  // (e.g. company="Company", email="Email") instead of a real value.
+  const nph = (v: string) => isPlaceholder(v) ? '' : v;
 
-  const resolvedFullName = mapped.fullName || fallbackFullName || asCleanString([card.firstName, card.lastName].filter(Boolean).join(' '));
+  const fallbackFullName =
+    nph(asCleanString(card.fullName))
+    || nph(asCleanString(card.name))
+    || nph(asCleanString(card.contactName))
+    || nph(asCleanString(card.person));
+  const fallbackCompany =
+    nph(asCleanString(card.company))
+    || nph(asCleanString(card.organization))
+    || nph(asCleanString(card.org))
+    || nph(asCleanString(card.companyName))
+    || nph(asCleanString(card.business));
+  const fallbackTitle =
+    nph(asCleanString(card.title))
+    || nph(asCleanString(card.jobTitle))
+    || nph(asCleanString(card.position))
+    || nph(asCleanString(card.role));
+  const fallbackPhone =
+    nph(asCleanString(card.phone))
+    || nph(asCleanString(card.phoneNumber))
+    || nph(asCleanString(card.mobile))
+    || nph(asCleanString(card.tel));
+  const fallbackEmail =
+    nph(asCleanString(card.email))
+    || nph(asCleanString(card.emailAddress))
+    || nph(asCleanString(card.mail));
+  const fallbackWebsite =
+    nph(asCleanString(card.website))
+    || nph(asCleanString(card.url))
+    || nph(asCleanString(card.web));
+  const fallbackAddress =
+    nph(asCleanString(card.address))
+    || nph(asCleanString(card.mailingAddress))
+    || nph(asCleanString(card.streetAddress));
+
+  const resolvedFullName = mapped.fullName || fallbackFullName || nph(asCleanString([card.firstName, card.lastName].filter(Boolean).join(' ')));
   const splitName = splitPersonName(resolvedFullName);
-  const extractedFirstName = asCleanString(card.firstName);
-  const extractedLastName = asCleanString(card.lastName);
+  const extractedFirstName = nph(asCleanString(card.firstName));
+  const extractedLastName = nph(asCleanString(card.lastName));
   const resolvedFirstName = extractedFirstName || splitName.firstName;
   const resolvedLastName = extractedLastName || splitName.lastName;
   const resolvedCompany = resolveBusinessCardCompany(
@@ -1878,6 +1882,18 @@ function mapBusinessCard(card: Record<string, unknown>): BusinessCardEntry {
   if (resolved.inferredCompanySource) {
     resolverExtras['inferredCompanySource'] = resolved.inferredCompanySource;
   }
+  if (resolved.tagline) {
+    resolverExtras['tagline'] = resolved.tagline;
+  }
+
+  // ── Build needsReview / confidence from resolver signals ──────────────────
+  const resolverNeedsReview = resolved.needsReview ?? false;
+  const resolverReviewReasons = resolved.reviewReasons ?? [];
+  const resolverConfidence = resolved.overallConfidence ?? 0;
+  const resolverFieldConfidence = resolved.fieldConfidence;
+
+  // Combine any review reasons from both API and resolver passes
+  const finalWarnings = [...(resolved.warnings ?? []), ...(resolverReviewReasons)];
 
   return {
     id: String(card.id ?? crypto.randomUUID()),
@@ -1895,6 +1911,11 @@ function mapBusinessCard(card: Record<string, unknown>): BusinessCardEntry {
     comment: asCleanString(card.comment),
     extraFields: { ...resolverExtras, ...extraFields },
     rawText: rawTextStr,
+    needsReview: resolverNeedsReview,
+    confidence: resolverConfidence,
+    fieldConfidence: resolverFieldConfidence,
+    warnings: finalWarnings.length > 0 ? finalWarnings : undefined,
+    status: resolverNeedsReview ? 'needs_review' : 'complete',
   };
 }
 
