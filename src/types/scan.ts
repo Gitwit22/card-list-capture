@@ -13,6 +13,15 @@ export interface SignupEntry {
   extraFields: Record<string, string>;
 }
 
+export interface NameParts {
+  firstName?: string;
+  middleName?: string;
+  lastName?: string;
+  prefix?: string;
+  suffix?: string;
+  credentials?: string[];
+}
+
 export interface AdditionalContact {
   name?: string;
   phone?: string;
@@ -39,6 +48,7 @@ export interface BusinessCardEntry {
   firstName: string;
   lastName: string;
   namePartsExtracted?: boolean;
+  nameParts?: NameParts;
   company: string;
   title: string;
   phone: string;

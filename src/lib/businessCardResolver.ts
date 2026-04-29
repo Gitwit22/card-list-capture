@@ -438,6 +438,10 @@ function sanitizeCompany(raw: string): { company: string; movedAddress: string }
   if (SUITE_LINE_RE.test(raw)) {
     return { company: '', movedAddress: raw };
   }
+  // Hard rule: a numbered street line (e.g. "172 W. Van Buren Street") must never be company
+  if (NUMBERED_STREET_RE.test(raw)) {
+    return { company: '', movedAddress: raw };
+  }
   return { company: raw, movedAddress: '' };
 }
 
@@ -919,9 +923,14 @@ export function resolveFromRawText(rawText: string): Partial<ResolvedCard> {
   if (nameCandidates.length > 0) {
     nameCandidates.sort((a, b) => b.score - a.score);
     const best = nameCandidates[0];
-    fullName = best.credParsed.name;
-    credentials = best.credParsed.credentials.join(', ');
-    nameLineIndex = best.index;
+    // Only accept a candidate when confidence is sufficient (maps to >= 0.75 field confidence).
+    // score >= 5 → 0.85 confidence; score < 5 (score 1–4) → 0.70, which is below the 0.75 threshold.
+    if (best.score >= 5) {
+      fullName = best.credParsed.name;
+      credentials = best.credParsed.credentials.join(', ');
+      nameLineIndex = best.index;
+    }
+    // If we had candidates but none were credible enough, record this for review.
   }
 
   // Derived tagline: first tagline line, or first service-description line
@@ -1055,18 +1064,14 @@ export function resolveFromRawText(rawText: string): Partial<ResolvedCard> {
 
   if (cleanFullName) {
     const bestScore = nameCandidates.length > 0 ? nameCandidates[0].score : 0;
+    // Since we now only accept candidates with score >= 5, bestScore will be >= 5 here.
     if (bestScore >= 10) {
       fieldConfidence.firstName = 0.95;
       fieldConfidence.lastName  = 0.90;
-    } else if (bestScore >= 5) {
+    } else {
+      // score >= 5 (the minimum accepted)
       fieldConfidence.firstName = 0.85;
       fieldConfidence.lastName  = 0.80;
-    } else if (bestScore >= 1) {
-      fieldConfidence.firstName = 0.70;
-      fieldConfidence.lastName  = 0.65;
-    } else {
-      fieldConfidence.firstName = 0.50;
-      fieldConfidence.lastName  = 0.45;
     }
   }
 
@@ -1084,6 +1089,8 @@ export function resolveFromRawText(rawText: string): Partial<ResolvedCard> {
 
   if (!cleanFullName && !cleanCompany) reviewReasons.push('no_name_or_company');
   if (!cleanFullName && cleanCompany) reviewReasons.push('no_person_name');
+  // Flag when there were name candidates but none had sufficient confidence
+  if (!cleanFullName && nameCandidates.length > 0) reviewReasons.push('no_credible_name');
   // Use 0 as default so absent confidence (no name/company found) correctly triggers the flag.
   if (cleanFullName && (fieldConfidence.firstName ?? 0) < 0.65) reviewReasons.push('low_confidence_name');
   if (cleanCompany && (fieldConfidence.company ?? 0) < 0.60) reviewReasons.push('low_confidence_company');

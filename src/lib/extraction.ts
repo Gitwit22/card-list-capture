@@ -409,22 +409,32 @@ function assessBusinessCardQuality(row: BusinessCardEntry): { confidence: number
     warnings.push('Unusually high number of phone numbers detected.');
   }
 
-  const missingCoreCount = [row.fullName, row.company, row.email, row.phone]
-    .filter((value) => String(value ?? '').trim().length === 0)
-    .length;
-
-  if (missingCoreCount >= 2) {
-    warnings.push('Required fields are missing.');
+  // Require at least one identifying field (name, company, or title) AND one contact method
+  const hasIdentifying = Boolean(
+    String(row.fullName ?? '').trim() ||
+    String(row.company ?? '').trim() ||
+    String(row.title ?? '').trim(),
+  );
+  const hasContact = Boolean(
+    String(row.email ?? '').trim() ||
+    String(row.phone ?? '').trim() ||
+    String(row.website ?? '').trim(),
+  );
+  if (!hasIdentifying || !hasContact) {
+    warnings.push('Missing required fields.');
   }
 
   const emailDomain = getDomain(String(row.email ?? ''));
   const websiteDomain = getDomain(String(row.website ?? ''));
-  const companyToken = String(row.company ?? '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
-  if (emailDomain && websiteDomain && emailDomain !== websiteDomain) {
+  // Only warn on email/website domain mismatch when both are specific (non-generic) domains.
+  // Gmail + personal website is normal for freelancers and should not be flagged.
+  if (
+    emailDomain && websiteDomain &&
+    emailDomain !== websiteDomain &&
+    !GENERIC_EMAIL_DOMAINS.has(emailDomain) &&
+    !GENERIC_EMAIL_DOMAINS.has(websiteDomain)
+  ) {
     warnings.push('Email domain does not match website domain.');
-  }
-  if (emailDomain && companyToken && !emailDomain.replace(/[^a-z0-9]/g, '').includes(companyToken.slice(0, 5))) {
-    warnings.push('Email domain appears inconsistent with company name.');
   }
 
   if ((emails.length >= 2 && companies.length >= 2) || raw.length > 900) {
@@ -761,6 +771,15 @@ const SIGNUP_FIELD_MAP: Record<SignupCanonicalField, string[]> = {
 };
 
 const SIGNUP_ROW_IGNORE_KEYS = new Set(['id', 'extrafields', 'metadata', 'meta', 'region', 'sheet']);
+
+// ─── Generic email/website domains — domain mismatch warnings are suppressed for these ──
+const GENERIC_EMAIL_DOMAINS = new Set([
+  'gmail.com', 'yahoo.com', 'outlook.com', 'hotmail.com', 'icloud.com',
+  'aol.com', 'proton.me', 'protonmail.com', 'live.com', 'msn.com',
+  'me.com', 'mac.com', 'comcast.net', 'att.net', 'verizon.net',
+  'sbcglobal.net', 'bellsouth.net', 'cox.net', 'earthlink.net',
+  'ymail.com', 'inbox.com', 'mail.com', 'zoho.com',
+]);
 
 const ORGANIZATION_HINTS = /\b(llc|inc|corp|co|company|agency|group|foundation|ministries|ministry|church|university|college|school|hospital|center|centre|services|network|association|institute)\b/i;
 const BUSINESS_CARD_COMPANY_HINTS = /\b(llc|l\.l\.c\.|inc|inc\.|corp|corporation|co\.?|company|group|agency|services|solutions|clinic|firm|partners|studio|consulting|systems|associates)\b/i;

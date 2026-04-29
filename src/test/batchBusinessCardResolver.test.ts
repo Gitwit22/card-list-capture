@@ -400,8 +400,8 @@ describe('validateCardForExport', () => {
     expect(result.blockedReasons).toHaveLength(0);
   });
 
-  it('marks export_blocked when no name or company', () => {
-    const card = makeCard({ fullName: '', firstName: '', lastName: '', company: '' });
+  it('marks export_blocked when no name, company, or title', () => {
+    const card = makeCard({ fullName: '', firstName: '', lastName: '', company: '', title: '' });
 
     const result = validateCardForExport(card);
     expect(result.status).toBe('export_blocked');
@@ -472,7 +472,7 @@ describe('validateBatch', () => {
   it('annotates all cards with export status', () => {
     const cards = [
       makeCard({ fullName: 'Alice', email: 'alice@acme.com', confidence: 0.90, needsReview: false, status: 'complete' }),
-      makeCard({ fullName: '', firstName: '', lastName: '', company: '' }),
+      makeCard({ fullName: '', firstName: '', lastName: '', company: '', title: '' }),
     ];
 
     const result = validateBatch(cards);
