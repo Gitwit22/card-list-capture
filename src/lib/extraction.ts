@@ -1723,6 +1723,22 @@ function mapSignupRow(row: Record<string, unknown>): SignupEntry {
   };
 }
 
+/**
+ * Returns true if a name string looks like an organization / agency name
+ * rather than a person name. Used to detect when the API returned an org
+ * name in the fullName field and we should prefer the resolver's result.
+ */
+function looksLikeOrgName(name: string): boolean {
+  if (!name) return false;
+  const s = name.trim();
+  // All-caps multi-word strings that contain org keywords
+  const ORG_KEYWORDS = /\b(department|county|state|city|district|authority|agency|commission|bureau|division|ministry|office of|services|health|human|corporation|inc\.?|llc\.?|ltd\.?|co\.)\b/i;
+  if (ORG_KEYWORDS.test(s)) return true;
+  // Starts with known org-type prefixes
+  if (/^(state of|city of|county of|department of|ministry of)/i.test(s)) return true;
+  return false;
+}
+
 function mapBusinessCard(card: Record<string, unknown>): BusinessCardEntry {
   const cardExtra = (card.extraFields ?? {}) as Record<string, unknown>;
   const mergedSource: Record<string, unknown> = {
@@ -1804,17 +1820,24 @@ function mapBusinessCard(card: Record<string, unknown>): BusinessCardEntry {
   const hadApiCompanyData = Boolean(mapped.organization || fallbackCompany);
   const finalCompany = resolvedCompany || (!hadApiCompanyData ? resolved.company ?? '' : '') || '';
 
-  // For fullName: prefer structured API result; fall back to resolver.
+  // For fullName: prefer structured API result UNLESS it looks like an org name,
+  // in which case fall back to the resolver's name.
   const apiFullName = splitName.fullName || resolvedFullName;
-  const finalFullName = apiFullName || resolved.fullName || '';
+  const finalFullName = (apiFullName && !looksLikeOrgName(apiFullName))
+    ? apiFullName
+    : (resolved.fullName || apiFullName || '');
   const finalFirstName = resolvedFirstName || resolved.firstName || '';
   const finalLastName = resolvedLastName || resolved.lastName || '';
 
   // For address: structured first, then resolver.
   const finalAddress = (mapped.address || fallbackAddress) || resolved.address || '';
 
-  // For phone: structured first, then resolver.
-  const finalPhone = (mapped.phone || fallbackPhone) || resolved.phone || '';
+  // For phone: structured first, then resolver. If the API phone matches the
+  // resolver's fax number, prefer the resolver's non-fax phone instead.
+  const apiPhone = (mapped.phone || fallbackPhone).trim();
+  const finalPhone = (apiPhone && apiPhone !== resolved.fax)
+    ? apiPhone
+    : resolved.phone || apiPhone || '';
 
   // Move resolver's otherPhones into extraFields so they surface in review.
   const resolverExtras: Record<string, string> = {};
@@ -1825,6 +1848,18 @@ function mapBusinessCard(card: Record<string, unknown>): BusinessCardEntry {
   }
   if (resolved.credentials) {
     resolverExtras['credentials'] = resolved.credentials;
+  }
+  if (resolved.fax) {
+    resolverExtras['fax'] = resolved.fax;
+  }
+  if (resolved.department) {
+    resolverExtras['department'] = resolved.department;
+  }
+  if (resolved.organizationUnit) {
+    resolverExtras['organizationUnit'] = resolved.organizationUnit;
+  }
+  if (resolved.subtitle) {
+    resolverExtras['subtitle'] = resolved.subtitle;
   }
 
   return {

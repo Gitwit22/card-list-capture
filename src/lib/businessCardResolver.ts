@@ -33,6 +33,35 @@ const SERVICE_WORDS = new Set([
   'associates', 'agency', 'network', 'realty', 'insurance', 'financial',
 ]);
 
+// ─── Organization-line detection ──────────────────────────────────────────────
+// Lines matching these patterns should never become person names.
+const ORG_LINE_PREFIXES = /^(state of|city of|county of|office of|department of|ministry of|bureau of|university of|republic of|province of)\b/i;
+const ORG_LINE_KEYWORDS = /\b(department|county|township|parish|borough|city of|university|ministry|ministries|church|office of|government|bureau|division|authority|commission|tribunal|district)\b/i;
+
+function isOrgLine(line: string): boolean {
+  const trimmed = line.trim();
+  return ORG_LINE_PREFIXES.test(trimmed) || ORG_LINE_KEYWORDS.test(trimmed);
+}
+
+// ─── Honorific detection ──────────────────────────────────────────────────────
+// Lines starting with an honorific are strong person-name candidates and should
+// outrank any organization or all-caps line.
+const HONORIFIC_RE = /^(Mr\.|Ms\.|Mrs\.|Dr\.|Rev\.|Hon\.|Prof\.|Atty\.?|Officer)\s/i;
+
+function hasHonorific(line: string): boolean {
+  return HONORIFIC_RE.test(line.trim());
+}
+
+// ─── Title role keywords ──────────────────────────────────────────────────────
+const TITLE_ROLE_KEYWORDS = /\b(coach|director|manager|officer|coordinator|specialist|consultant|founder|owner|president|representative|agent|advisor|assistant|administrator|supervisor|associate|analyst|engineer|developer|lead|executive|vice|ceo|coo|cfo|cto|vp|partner|secretary|treasurer|liaison|strategist|technician|superintendent|commissioner|inspector)\b/i;
+
+// ─── Suite/floor/unit line pattern ────────────────────────────────────────────
+const SUITE_LINE_RE = /^\s*(suite|ste|floor|fl|unit|apt|room|rm|#)\s*[-#]?\s*\d/i;
+/** Matches a known building/campus type word — used to identify building name lines. */
+const BUILDING_NAME_RE = /\b(building|bldg|tower|center|centre|plaza|hall|house|park|place|complex|campus|annex|square|pavilion|wing)\b/i;
+/** Matches a street line that begins with a house/street number. */
+const NUMBERED_STREET_RE = /^\d+[A-Za-z]?\s+\S/;
+
 // ─── Street suffix patterns ────────────────────────────────────────────────────
 const STREET_SUFFIX_RE = /\b(st|street|ave|avenue|blvd|boulevard|dr|drive|rd|road|ln|lane|ct|court|pl|place|pkwy|parkway|hwy|highway|way|cir|circle|ter|terrace|box|p\.?o\.?\s*box)\b/i;
 
@@ -48,7 +77,9 @@ const ZIP_RE = /\b\d{5}(-\d{4})?\b/;
 
 // ─── Phone number pattern ─────────────────────────────────────────────────────
 const PHONE_RE = /(?:\+?\d[\d\s()./-]{7,}\d)/g;
-const PHONE_LABEL_RE = /\b(mobile|cell|office|work|fax|direct|main|hq|toll\s*free)\b/i;
+// Labels that identify the phone type; fax is handled separately
+const PHONE_LABEL_RE = /\b(mobile|cell|office|work|fax|direct|main|hq|toll\s*free|phone|tel|telephone)\b/i;
+const FAX_LABEL_RE = /\bfax\b/i;
 
 // ─── Email pattern ────────────────────────────────────────────────────────────
 const EMAIL_RE = /[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}/gi;
@@ -66,9 +97,11 @@ function isAllCapsWord(word: string): boolean {
   return word.length >= 1 && /[A-Z]/.test(word) && !/[a-z]/.test(word);
 }
 
+// Word limit raised to 10 so long agency names like
+// "DEPARTMENT OF HEALTH AND HUMAN SERVICES" (7 words) are still recognised.
 function isAllCapsLine(line: string): boolean {
   const words = line.split(/\s+/).filter(Boolean);
-  return words.length >= 1 && words.length <= 5 && words.every(isAllCapsWord);
+  return words.length >= 1 && words.length <= 10 && words.every(isAllCapsWord);
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -181,6 +214,11 @@ export function cleanWebsite(raw: string): string {
 
 /**
  * Check if a line is a valid person name candidate.
+ *
+ *  - Organization lines (STATE OF, DEPARTMENT, COUNTY, etc.) are rejected.
+ *  - All-caps lines that also contain org keywords are rejected.
+ *  - Lines with honorifics are NOT routed through here — the honorific fast-path
+ *    in resolveFromRawText promotes them directly.
  */
 function isPersonNameCandidate(line: string): boolean {
   const trimmed = line.trim();
@@ -193,6 +231,8 @@ function isPersonNameCandidate(line: string): boolean {
   if (isBareState(trimmed)) return false;
   if (ZIP_RE.test(trimmed)) return false;
   if (/^P\.?\s*O\.?\s*Box/i.test(trimmed)) return false;
+  // Organization lines must never become person names
+  if (isOrgLine(trimmed)) return false;
 
   // Strip credentials first to get just the name part
   const { name } = stripCredentials(trimmed);
@@ -222,13 +262,18 @@ export interface ResolvedCard {
   lastName: string;
   credentials: string;
   company: string;
+  department?: string;
+  organizationUnit?: string;
   title: string;
+  subtitle?: string;
   phone: string;
+  fax?: string;
   otherPhones: string[];
   email: string;
   website: string;
   address: string;
   extraFields: Record<string, string>;
+  warnings: string[];
 }
 
 /**
@@ -275,15 +320,21 @@ export function resolveFromRawText(rawText: string): Partial<ResolvedCard> {
     }
   }
 
-  // Prefer "office" or unlabeled as primary, "mobile"/"cell" as other
-  const officePhone = phonePairs.find((p) => p.label === 'office' || p.label === 'work')?.number ?? '';
-  const mobilePhone = phonePairs.find((p) => p.label === 'mobile' || p.label === 'cell')?.number ?? '';
-  const firstPhone = phonePairs[0]?.number ?? '';
+  // Separate fax from non-fax phone pairs
+  const faxPairs = phonePairs.filter((p) => FAX_LABEL_RE.test(p.label));
+  const nonFaxPairs = phonePairs.filter((p) => !FAX_LABEL_RE.test(p.label));
+  const fax = faxPairs[0]?.number ?? '';
 
-  const phone = officePhone || (phonePairs.length === 1 ? firstPhone : '') || mobilePhone || firstPhone;
-  const otherPhones = phonePairs
+  // Priority: direct/phone/tel > office/work > mobile/cell > unlabeled
+  const directPhone = nonFaxPairs.find((p) => /^(phone|tel|telephone|direct)$/.test(p.label))?.number ?? '';
+  const officePhone = nonFaxPairs.find((p) => /^(office|work)$/.test(p.label))?.number ?? '';
+  const mobilePhone = nonFaxPairs.find((p) => /^(mobile|cell)$/.test(p.label))?.number ?? '';
+  const firstNonFax = nonFaxPairs[0]?.number ?? '';
+
+  const phone = directPhone || officePhone || (nonFaxPairs.length === 1 ? firstNonFax : '') || mobilePhone || firstNonFax;
+  const otherPhones = nonFaxPairs
     .map((p) => (p.label ? `${p.number} ${p.label}` : p.number).trim())
-    .filter((p) => p.replace(/\s*(office|work)$/i, '').trim() !== phone.trim());
+    .filter((p) => p.replace(/\s*(phone|tel|telephone|direct|office|work)$/i, '').trim() !== phone.trim());
 
   // ── 3. Extract website ────────────────────────────────────────────────────
   let website = '';
@@ -298,56 +349,102 @@ export function resolveFromRawText(rawText: string): Partial<ResolvedCard> {
   }
 
   // ── 4. Extract address ────────────────────────────────────────────────────
-  // Look for a street line followed by (or preceded by) a city/state/ZIP line
+  // Prefer a NUMBERED street line (digits + street suffix) as the anchor.
+  // If none exists, fall back to any STREET_SUFFIX_RE match.
+  // Look back one line for a building name (must contain a known building word).
+  // Look forward for a suite/floor line then city/state/ZIP.
   let address = '';
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    const next = lines[i + 1] ?? '';
+  {
+    let streetIdx = -1;
 
-    if (/^P\.?\s*O\.?\s*Box/i.test(line) || STREET_SUFFIX_RE.test(line)) {
-      if (CITY_STATE_ZIP_RE.test(next)) {
-        address = `${line}, ${next}`;
+    // First pass: numbered street (e.g. "3040 W. Grand Blvd.")
+    for (let i = 0; i < lines.length; i++) {
+      if (NUMBERED_STREET_RE.test(lines[i]) && STREET_SUFFIX_RE.test(lines[i])) {
+        streetIdx = i;
         break;
       }
-      if (ZIP_RE.test(next) || (US_STATES.has(next.split(/[\s,]+/)[1] ?? ''))) {
-        address = `${line}, ${next}`;
-        break;
-      }
-      address = line;
-      // keep looking for city/state line
     }
 
-    if (CITY_STATE_ZIP_RE.test(line) && !address) {
-      // Check if previous line was a street
-      const prev = lines[i - 1] ?? '';
-      if (STREET_SUFFIX_RE.test(prev) || /^P\.?\s*O\.?\s*Box/i.test(prev)) {
-        address = `${prev}, ${line}`;
-      } else {
-        address = line;
+    // Second pass: any street suffix match (e.g. P.O. Box, "Elm Place")
+    if (streetIdx < 0) {
+      for (let i = 0; i < lines.length; i++) {
+        if (/^P\.?\s*O\.?\s*Box/i.test(lines[i]) || STREET_SUFFIX_RE.test(lines[i])) {
+          streetIdx = i;
+          break;
+        }
       }
-      break;
+    }
+
+    if (streetIdx >= 0) {
+      const parts: string[] = [];
+
+      // Look back one line for a building/place name.
+      // We only include it if it contains a known building-type word, so that
+      // person names like "Jane Smith" (before the street) are not captured.
+      const prev = lines[streetIdx - 1] ?? '';
+      if (
+        prev &&
+        BUILDING_NAME_RE.test(prev) &&
+        !isAllCapsLine(prev) &&
+        !looksLikeEmail(prev) &&
+        !looksLikePhone(prev) &&
+        !looksLikeCityStateZip(prev) &&
+        !PHONE_LABEL_RE.test(prev) &&
+        !looksLikeDomain(prev)
+      ) {
+        parts.push(prev);
+      }
+
+      parts.push(lines[streetIdx]);
+
+      // Look forward for suite / floor line then city/state/ZIP
+      const next1 = lines[streetIdx + 1] ?? '';
+      const next2 = lines[streetIdx + 2] ?? '';
+      if (SUITE_LINE_RE.test(next1)) {
+        parts.push(next1);
+        if (CITY_STATE_ZIP_RE.test(next2) || ZIP_RE.test(next2)) {
+          parts.push(next2);
+        }
+      } else if (CITY_STATE_ZIP_RE.test(next1) || ZIP_RE.test(next1)) {
+        parts.push(next1);
+      } else if (next1 && CITY_STATE_ZIP_RE.test(next2)) {
+        // next1 is a continued address line (e.g. second street line)
+        parts.push(next1);
+        parts.push(next2);
+      }
+
+      address = parts.join('\n');
+    } else {
+      // No street suffix found — fall back to city/state/ZIP line alone
+      for (let i = 0; i < lines.length; i++) {
+        if (CITY_STATE_ZIP_RE.test(lines[i])) {
+          address = lines[i];
+          break;
+        }
+      }
     }
   }
 
-  // ── 5. Detect stacked brand/logo lines → company ─────────────────────────
-  // Consecutive all-caps lines near the top (before any name/email/phone) form the company name
+  // ── 5. Detect stacked brand/logo lines → company + department hierarchy ──
+  // Consecutive all-caps lines near the top form the org hierarchy:
+  //   line 1 = company, line 2 = department, line 3 = organizationUnit
   let company = '';
+  let department: string | undefined;
+  let organizationUnit: string | undefined;
   let companyEndIndex = -1;
 
   {
     const stackedCaps: string[] = [];
-    let stackStart = -1;
     let i = 0;
 
-    // Scan the first 8 lines for all-caps stacks
-    for (; i < Math.min(lines.length, 8); i++) {
+    // Scan the first 10 lines for all-caps stacks
+    for (; i < Math.min(lines.length, 10); i++) {
       const line = lines[i];
-      // Skip lines that are clearly phones/emails/domains at the very top
+      // Stop at phones/emails/domains
       if (looksLikeEmail(line) || looksLikePhone(line)) break;
 
       if (isAllCapsLine(line)) {
-        if (stackStart < 0) stackStart = i;
-        stackedCaps.push(toTitleCase(line.replace(/[®™]/g, '').trim()));
+        stackedCaps.push(line.replace(/[®™]/g, '').trim());
         companyEndIndex = i;
       } else if (stackedCaps.length > 0) {
         // Stack broken — stop collecting
@@ -355,14 +452,20 @@ export function resolveFromRawText(rawText: string): Partial<ResolvedCard> {
       }
     }
 
-    if (stackedCaps.length >= 2) {
-      company = stackedCaps.join(' ');
+    if (stackedCaps.length >= 2 && stackedCaps.some((s) => isOrgLine(s))) {
+      // Org hierarchy: line 1 = company, line 2 = department, optional line 3 = orgUnit
+      company = toTitleCase(stackedCaps[0]);
+      department = toTitleCase(stackedCaps[1]);
+      if (stackedCaps.length >= 3) organizationUnit = toTitleCase(stackedCaps[2]);
+    } else if (stackedCaps.length >= 2) {
+      // Logo/brand name split across multiple short lines — join all into company
+      company = toTitleCase(stackedCaps.join(' '));
     } else if (stackedCaps.length === 1) {
       // Single all-caps line — may be company if it looks like a brand/domain
-      const single = stackedCaps[0];
-      if (looksLikeDomain(single.toLowerCase())) {
+      const lineRaw = stackedCaps[0];
+      const single = toTitleCase(lineRaw);
+      if (looksLikeDomain(lineRaw.toLowerCase())) {
         // It's a domain-as-company (e.g. BRIONPRICE.COM)
-        // Look at next non-caps line for a service word
         const nextLineRaw = lines[companyEndIndex + 1] ?? '';
         const nextWords = nextLineRaw.trim().toLowerCase().split(/\s+/);
         if (nextWords.length >= 1 && nextWords.every((w) => SERVICE_WORDS.has(w) || /^[a-z]+$/.test(w))) {
@@ -371,11 +474,10 @@ export function resolveFromRawText(rawText: string): Partial<ResolvedCard> {
         } else {
           company = single;
         }
-        // website comes from the domain
         if (!website) {
-          website = cleanWebsite(single.toLowerCase()) || single.toLowerCase().replace(/[®™]/g, '');
+          website = cleanWebsite(lineRaw.toLowerCase()) || lineRaw.toLowerCase().replace(/[®™]/g, '');
         }
-      } else if (!isBareState(lines[companyEndIndex] ?? single) && !SERVICE_WORDS.has(single.toLowerCase())) {
+      } else if (!isBareState(lineRaw) && !SERVICE_WORDS.has(lineRaw.toLowerCase())) {
         company = single;
       }
     }
@@ -386,26 +488,38 @@ export function resolveFromRawText(rawText: string): Partial<ResolvedCard> {
   let credentials = '';
   let nameLineIndex = -1;
 
-  // Search lines after the company block
   const searchStart = companyEndIndex + 1;
+
+  // Honorific fast-path: a line starting with Mr./Ms./Dr./etc. is unambiguously a name
   for (let i = searchStart; i < lines.length; i++) {
-    const line = lines[i];
-
-    // Skip lines we've already classified
-    if (looksLikeEmail(line)) continue;
-    if (looksLikePhone(line)) continue;
-    if (looksLikeDomain(line)) continue;
-    if (looksLikeAddress(line)) continue;
-    if (looksLikeCityStateZip(line)) continue;
-    if (isBareState(line)) continue;
-    if (PHONE_LABEL_RE.test(line) && looksLikePhone(line.replace(PHONE_LABEL_RE, '').trim())) continue;
-
-    if (isPersonNameCandidate(line)) {
-      const stripped = stripCredentials(line);
+    if (hasHonorific(lines[i])) {
+      const stripped = stripCredentials(lines[i]);
       fullName = stripped.name;
       credentials = stripped.credentials.join(', ');
       nameLineIndex = i;
       break;
+    }
+  }
+
+  // Fallback: scan for first isPersonNameCandidate match after company block
+  if (!fullName) {
+    for (let i = searchStart; i < lines.length; i++) {
+      const line = lines[i];
+      if (looksLikeEmail(line)) continue;
+      if (looksLikePhone(line)) continue;
+      if (looksLikeDomain(line)) continue;
+      if (looksLikeAddress(line)) continue;
+      if (looksLikeCityStateZip(line)) continue;
+      if (isBareState(line)) continue;
+      if (PHONE_LABEL_RE.test(line) && looksLikePhone(line.replace(PHONE_LABEL_RE, '').trim())) continue;
+
+      if (isPersonNameCandidate(line)) {
+        const stripped = stripCredentials(line);
+        fullName = stripped.name;
+        credentials = stripped.credentials.join(', ');
+        nameLineIndex = i;
+        break;
+      }
     }
   }
 
@@ -414,9 +528,13 @@ export function resolveFromRawText(rawText: string): Partial<ResolvedCard> {
   const firstName = nameParts[0] ?? '';
   const lastName = nameParts.slice(1).join(' ');
 
-  // ── 8. Find title (line immediately after name, not an email/phone/address) ─
+  // ── 8. Find title and subtitle (lines immediately after name) ────────────
   let title = credentials; // credentials go into title if not a separate field
+  let subtitle: string | undefined;
+  const warnings: string[] = [];
+
   if (nameLineIndex >= 0) {
+    let titleFound = false;
     for (let i = nameLineIndex + 1; i < lines.length; i++) {
       const line = lines[i];
       if (looksLikeEmail(line)) continue;
@@ -424,14 +542,25 @@ export function resolveFromRawText(rawText: string): Partial<ResolvedCard> {
       if (looksLikeAddress(line)) break;
       if (looksLikeDomain(line)) break;
       if (looksLikeCityStateZip(line)) break;
-      // A title line typically has alphabetic words, possibly with dashes and parens
+      if (isOrgLine(line)) break;
+      // A title/subtitle line has alphabetic words
       if (/^[A-Za-z]/.test(line) && !/^\d/.test(line)) {
-        const withCredential = credentials ? `${credentials} / ${line}` : line;
-        title = withCredential;
-        break;
+        if (!titleFound) {
+          const withCredential = credentials ? `${credentials} / ${line}` : line;
+          title = withCredential;
+          titleFound = true;
+        } else {
+          subtitle = line;
+          break;
+        }
       }
     }
   }
+
+  // ── 9. Resolver warnings ──────────────────────────────────────────────────
+  if (!fullName) warnings.push('name_not_found');
+  if (!company) warnings.push('company_not_found');
+  if (fax && phone === fax) warnings.push('fax_promoted_as_phone');
 
   return {
     fullName,
@@ -439,12 +568,17 @@ export function resolveFromRawText(rawText: string): Partial<ResolvedCard> {
     lastName,
     credentials,
     company,
+    ...(department !== undefined && { department }),
+    ...(organizationUnit !== undefined && { organizationUnit }),
     title,
+    ...(subtitle !== undefined && { subtitle }),
     phone,
+    ...(fax ? { fax } : {}),
     otherPhones,
     email,
     website,
     address,
     extraFields: {},
+    warnings,
   };
 }

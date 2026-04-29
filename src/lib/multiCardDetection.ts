@@ -31,6 +31,10 @@ export interface DetectionCandidateDebug {
   confidence: number;
   score?: number;
   generatedBy?: CandidateOrigin;
+  rectangularity?: number;
+  edgeScore?: number;
+  rescueEligible?: boolean;
+  rescuedBy?: string;
 }
 
 export interface DetectionDebugInfo {
@@ -1455,7 +1459,10 @@ function splitWideCandidate(
   return children.length >= 2 ? children : [box];
 }
 
-function suppressCandidates(candidates: DetectionCandidate[]): {
+function suppressCandidates(
+  candidates: DetectionCandidate[],
+  recommendedMax: number = 6,
+): {
   accepted: DetectionCandidate[];
   suppressed: Array<{ candidate: DetectionCandidate; reason: string }>;
 } {
@@ -1467,6 +1474,10 @@ function suppressCandidates(candidates: DetectionCandidate[]): {
   const accepted: DetectionCandidate[] = [];
   const suppressed: Array<{ candidate: DetectionCandidate; reason: string }> = [];
 
+  // Minimum per-card area: at least half the expected per-card area share.
+  // Used by the multi-card-aware guard below.
+  const perCardMinAreaPercent = 0.5 / Math.max(1, recommendedMax);
+
   sorted.forEach((candidate) => {
     let rejectReason: string | null = null;
 
@@ -1474,6 +1485,23 @@ function suppressCandidates(candidates: DetectionCandidate[]): {
       const inside = insideRatio(candidate.box, keeper.box);
       const overlapSmall = overlapOverSmaller(candidate.box, keeper.box);
       const iou = getIoU(candidate.box, keeper.box);
+
+      // Multi-card-aware guard: if the keeper is much larger than the candidate
+      // (area ratio > 2.5) AND the candidate looks like a valid individual card
+      // (score ≥ 0.40 and occupies a plausible per-card share of the image),
+      // skip suppression from this particular keeper. The keeper may be a merged
+      // bounding box spanning multiple cards, and suppressing the individual card
+      // would cause under-detection.
+      const keeperArea = keeper.box.width * keeper.box.height;
+      const candidateArea = candidate.box.width * candidate.box.height;
+      const areaRatio = keeperArea / Math.max(1, candidateArea);
+      if (
+        areaRatio > 2.5
+        && candidate.assessment.score >= 0.40
+        && candidate.assessment.areaPercent >= perCardMinAreaPercent
+      ) {
+        continue; // don't let this oversized keeper suppress the candidate
+      }
 
       if (inside >= INSIDE_SUPPRESSION_THRESHOLD) {
         rejectReason = 'inside_larger_candidate';
@@ -2045,9 +2073,40 @@ export async function detectBusinessCardCrops(
     }
   }
 
-  const suppression = suppressCandidates(prelimAccepted);
+  const suppression = suppressCandidates(prelimAccepted, recommendedMax);
+
+  // ── Post-suppression rescue pass ─────────────────────────────────────────
+  // When the suppression step left fewer cards than expected (< 50% of
+  // recommendedMax), a large merged region may have incorrectly suppressed
+  // valid individual-card candidates. Rescue suppressed candidates that have
+  // a decent score (≥ 0.35) and don't significantly overlap with any already-
+  // accepted candidate (IoU < 0.30).
+  const rescueMinScore = 0.35;
+  const rescueMaxIoU = 0.30;
+  const rescueThreshold = Math.ceil(recommendedMax * 0.5);
+  const rescued: DetectionCandidate[] = [];
+
+  if (suppression.accepted.length < rescueThreshold) {
+    for (const { candidate } of suppression.suppressed) {
+      if (candidate.assessment.score < rescueMinScore) continue;
+
+      const overlapsAccepted = [...suppression.accepted, ...rescued].some(
+        (a) => getIoU(candidate.box, a.box) >= rescueMaxIoU,
+      );
+      if (overlapsAccepted) continue;
+
+      rescued.push(candidate);
+      if (suppression.accepted.length + rescued.length >= hardMax) break;
+    }
+    if (rescued.length > 0) {
+      warnings.push(`Rescued ${rescued.length} suppressed candidate(s) — fewer than ${rescueThreshold} cards were found after suppression.`);
+    }
+  }
+
+  const allAccepted = [...suppression.accepted, ...rescued];
+
   const cleanedAccepted = sortReadingOrder(nonMaximumSuppression(
-    suppression.accepted.map((candidate) => candidate.box),
+    allAccepted.map((candidate) => candidate.box),
     0.35,
   ));
   const selectedBoxes = cleanedAccepted.slice(0, hardMax);
@@ -2058,6 +2117,8 @@ export async function detectBusinessCardCrops(
 
   const selectedSet = new Set(selectedBoxes.map((box) => computeBoxSignature(box)));
 
+  const rescuedSet = new Set(rescued.map((c) => `${c.index}:${computeBoxSignature(c.box)}:${c.generatedBy}`));
+
   const debugCandidatesSource: Array<{ candidate: DetectionCandidate; reason: string }> = [
     ...prelimRejected,
     ...suppression.suppressed,
@@ -2066,6 +2127,10 @@ export async function detectBusinessCardCrops(
     ...suppression.accepted.map((candidate) => ({
       candidate,
       reason: selectedSet.has(computeBoxSignature(candidate.box)) ? 'accepted' : 'suppressed_or_merged',
+    })),
+    ...rescued.map((candidate) => ({
+      candidate,
+      reason: 'rescued',
     })),
   ];
 
@@ -2078,7 +2143,9 @@ export async function detectBusinessCardCrops(
       return true;
     })
     .map(({ candidate, reason }) => {
-      const accepted = reason === 'accepted';
+      const accepted = reason === 'accepted' || reason === 'rescued';
+      const isRescued = reason === 'rescued';
+      const candidateKey = `${candidate.index}:${computeBoxSignature(candidate.box)}:${candidate.generatedBy}`;
       return {
         index: candidate.index,
         status: accepted ? 'accepted' : 'rejected',
@@ -2089,7 +2156,12 @@ export async function detectBusinessCardCrops(
         areaPercent: Number((candidate.assessment.areaPercent * 100).toFixed(3)),
         confidence: Number(candidate.assessment.confidence.toFixed(3)),
         score: Number(candidate.assessment.score.toFixed(3)),
-      };
+        // Debug metrics from the candidate's measurement pass
+        rectangularity: Number(candidate.metrics.rectangularity.toFixed(3)),
+        edgeScore: Number(candidate.metrics.borderEdgeDensity.toFixed(3)),
+        rescueEligible: rescuedSet.has(candidateKey) || candidate.assessment.score >= rescueMinScore,
+        ...(isRescued && { rescuedBy: 'post_suppression_rescue' }),
+      } satisfies DetectionCandidateDebug;
     });
 
   const rejectionReasons: Record<string, number> = {};
@@ -2156,7 +2228,10 @@ export async function detectBusinessCardCrops(
     warnings.push(`More than ${recommendedMax} card-like regions were detected. Review crops before processing.`);
   }
 
-  if (crops.length > 0 && crops.length < recommendedMax) {
+  // Under-detection warning: fewer crops than half of what was expected.
+  if (crops.length > 0 && crops.length < Math.ceil(recommendedMax * 0.5)) {
+    warnings.push(`Only ${crops.length} of an expected ~${recommendedMax} cards were detected. Some cards may be missing — try better lighting or use manual crops.`);
+  } else if (crops.length > 0 && crops.length < recommendedMax) {
     warnings.push('Some cards may not have been detected. Try fewer cards per photo or add manual crops.');
   }
 

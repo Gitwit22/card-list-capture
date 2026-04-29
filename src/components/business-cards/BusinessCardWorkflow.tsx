@@ -209,6 +209,13 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
     loadSession()
       .then((result) => {
         if (result && result.session.mode === mode) {
+          if (import.meta.env.DEV) {
+            console.debug('[ScanMode] route-load — pending session found', {
+              storedScanMode: result.session.scanMode ?? null,
+              sessionId: result.session.id,
+              route: window.location.pathname,
+            });
+          }
           setPendingSession(result.session);
         }
         setSessionInitialized(true);
@@ -356,8 +363,28 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
     sessionIdRef.current = session.id;
     sessionCreatedAtRef.current = session.createdAt;
 
+    // Infer scanMode: prefer the stored value; for legacy sessions without it,
+    // derive from queue items so a multi-card session is never silently
+    // downgraded to single-card mode.
+    const inferredScanMode: ScanMode =
+      session.scanMode ??
+      (rebuiltQueue.some((item) => item.scanMode === 'multi-card') ? 'multi-card' : 'single-card');
+
+    if (import.meta.env.DEV) {
+      console.debug('[ScanMode] session-hydration', {
+        previousScanMode: 'single-card',
+        nextScanMode: inferredScanMode,
+        source: 'session-resume',
+        storedScanMode: session.scanMode ?? null,
+        queueSize: rebuiltQueue.length,
+        multiCardItems: rebuiltQueue.filter((i) => i.scanMode === 'multi-card').length,
+        sessionId: session.id,
+        route: window.location.pathname,
+      });
+    }
+
     setBatchQueue(rebuiltQueue);
-    setScanMode(session.scanMode ?? 'single-card');
+    setScanMode(inferredScanMode);
     setData(session.data);
     setBatchSessionRows(session.data);
     setDetectedCardCrops(
@@ -511,6 +538,16 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
     const sourceImageId = sourceImageIdOverride ?? crypto.randomUUID();
     setIsDetecting(true);
     sourceCaptureRef.current.set(sourceImageId, capture);
+
+    if (import.meta.env.DEV) {
+      console.debug('[ScanMode] before-detection', {
+        scanMode,
+        file: capture.file.name,
+        sourceImageId,
+        sessionId: sessionIdRef.current,
+        route: window.location.pathname,
+      });
+    }
 
     try {
       const detection = await detectBusinessCardCrops(capture.file, {
@@ -1121,6 +1158,16 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
       return;
     }
 
+    if (import.meta.env.DEV) {
+      console.debug('[ScanMode] before-process-batch', {
+        scanMode,
+        totalItems: batchQueue.length,
+        targetIds: targetIds.length,
+        sessionId: sessionIdRef.current,
+        route: window.location.pathname,
+      });
+    }
+
     setStep('batch-processing');
     setIsBatchProcessing(true);
 
@@ -1413,7 +1460,18 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
                     type="button"
                     size="sm"
                     variant={scanMode === 'single-card' ? 'default' : 'outline'}
-                    onClick={() => setScanMode('single-card')}
+                    onClick={() => {
+                      if (import.meta.env.DEV) {
+                        console.debug('[ScanMode] upload-mode-selection', {
+                          previousScanMode: scanMode,
+                          nextScanMode: 'single-card',
+                          source: 'scan-mode-button',
+                          sessionId: sessionIdRef.current,
+                          route: window.location.pathname,
+                        });
+                      }
+                      setScanMode('single-card');
+                    }}
                     disabled={isDetecting}
                   >
                     Scan as single card
@@ -1422,7 +1480,18 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
                     type="button"
                     size="sm"
                     variant={scanMode === 'multi-card' ? 'default' : 'outline'}
-                    onClick={() => setScanMode('multi-card')}
+                    onClick={() => {
+                      if (import.meta.env.DEV) {
+                        console.debug('[ScanMode] upload-mode-selection', {
+                          previousScanMode: scanMode,
+                          nextScanMode: 'multi-card',
+                          source: 'scan-mode-button',
+                          sessionId: sessionIdRef.current,
+                          route: window.location.pathname,
+                        });
+                      }
+                      setScanMode('multi-card');
+                    }}
                     disabled={isDetecting}
                   >
                     Detect multiple cards in photo
