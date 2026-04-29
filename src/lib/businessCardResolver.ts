@@ -399,8 +399,13 @@ function sanitizeWebsite(value: string): string {
 /** Reject a phone value that contains non-phone text (letters, HTML, address fragments). */
 function sanitizePhone(raw: string): string {
   if (!raw) return '';
-  // Strip HTML tags first
-  const stripped = raw.replace(HTML_TAG_RE, '').replace(/&[a-z]+;/gi, '');
+  // Strip HTML tags — use global replace repeatedly until no tags remain to avoid incomplete sanitization
+  let stripped = raw;
+  let prev = '';
+  do {
+    prev = stripped;
+    stripped = stripped.replace(HTML_TAG_RE, '').replace(/&[a-z]+;/gi, '');
+  } while (stripped !== prev);
   // If it looks like an address or has sentence-length text, discard
   if (STREET_SUFFIX_RE.test(stripped) || PO_BOX_RE.test(stripped) || CITY_STATE_ZIP_RE.test(stripped)) return '';
   // Count alpha characters: if more alpha than digit chars → probably text, not phone
@@ -1079,8 +1084,9 @@ export function resolveFromRawText(rawText: string): Partial<ResolvedCard> {
 
   if (!cleanFullName && !cleanCompany) reviewReasons.push('no_name_or_company');
   if (!cleanFullName && cleanCompany) reviewReasons.push('no_person_name');
-  if ((fieldConfidence.firstName ?? 1) < 0.65) reviewReasons.push('low_confidence_name');
-  if ((fieldConfidence.company ?? 1) < 0.60) reviewReasons.push('low_confidence_company');
+  // Use 0 as default so absent confidence (no name/company found) correctly triggers the flag.
+  if (cleanFullName && (fieldConfidence.firstName ?? 0) < 0.65) reviewReasons.push('low_confidence_name');
+  if (cleanCompany && (fieldConfidence.company ?? 0) < 0.60) reviewReasons.push('low_confidence_company');
   if (websiteContaminated) reviewReasons.push('website_contamination_cleaned');
   if (phoneContaminated) reviewReasons.push('phone_contamination_cleaned');
   if (titleContaminated) reviewReasons.push('title_address_moved');

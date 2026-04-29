@@ -120,11 +120,15 @@ export function DataReview({ docType, data, onChange, businessCardFilter, onBusi
   const filterCounts = (() => {
     if (docType !== 'business-card') return null;
     const cards = data as BusinessCardEntry[];
+    // Counts are mutually exclusive: failed > needs_review > complete
+    const failedCount = cards.filter((c) => c.status === 'failed').length;
+    const needsReviewCount = cards.filter((c) => c.status !== 'failed' && (c.needsReview || c.status === 'needs_review')).length;
+    const completeCount = cards.filter((c) => c.status !== 'failed' && !c.needsReview && c.status !== 'needs_review').length;
     return {
       all: cards.length,
-      needs_review: cards.filter((c) => c.needsReview || c.status === 'needs_review').length,
-      complete: cards.filter((c) => !c.needsReview && c.status !== 'failed').length,
-      failed: cards.filter((c) => c.status === 'failed').length,
+      needs_review: needsReviewCount,
+      complete: completeCount,
+      failed: failedCount,
     };
   })();
 
@@ -132,9 +136,9 @@ export function DataReview({ docType, data, onChange, businessCardFilter, onBusi
   const visibleData = (() => {
     if (docType !== 'business-card' || !businessCardFilter || businessCardFilter === 'all') return data;
     return (data as BusinessCardEntry[]).filter((card) => {
-      if (businessCardFilter === 'needs_review') return card.needsReview || card.status === 'needs_review';
-      if (businessCardFilter === 'complete') return !card.needsReview && card.status !== 'failed';
       if (businessCardFilter === 'failed') return card.status === 'failed';
+      if (businessCardFilter === 'needs_review') return card.status !== 'failed' && (card.needsReview || card.status === 'needs_review');
+      if (businessCardFilter === 'complete') return card.status !== 'failed' && !card.needsReview && card.status !== 'needs_review';
       return true;
     });
   })();
@@ -188,14 +192,14 @@ export function DataReview({ docType, data, onChange, businessCardFilter, onBusi
       )}
 
       <div className="space-y-3">
-        {visibleData.map((entry, visibleIndex) => {
+        {visibleData.map((entry) => {
           const realIndex = data.indexOf(entry);
           return (
           <div key={entry.id} className="bg-card rounded-lg border border-border p-4 card-shadow">
             <div className="flex items-center justify-between mb-3">
               <div className="flex items-center gap-2 flex-wrap">
                 <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
-                  Entry {visibleIndex + 1}
+                  Entry {realIndex + 1}
                 </span>
                 {docType === 'business-card' && (() => {
                   const card = entry as BusinessCardEntry;
