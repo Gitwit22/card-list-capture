@@ -692,4 +692,91 @@ describe('extraction', () => {
       expect(merged.conflictFields).toContain('phone');
     });
   });
+
+  describe('business-card normalization regressions', () => {
+    beforeEach(() => {
+      vi.stubEnv('VITE_DOC_INTEL_URL', 'https://mock.api');
+      vi.stubEnv('VITE_DOC_INTEL_TOKEN', 'mock-token');
+    });
+
+    it('moves organization-like fullName into company', async () => {
+      const mockResponse = {
+        status: 'complete',
+        structure: 'single-entity',
+        detectedHeaders: ['Name', 'Email'],
+        headerMapping: [],
+        confidence: 0.81,
+        card: {
+          id: 'org-name',
+          fullName: 'THAI SPA PAVILION',
+          company: '',
+          email: 'hello@thaispapavilion.com',
+          rawText: 'THAI SPA PAVILION\nhello@thaispapavilion.com',
+        },
+      };
+
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve(mockResponse) }));
+
+      const file = new File(['test'], 'org-name.jpg', { type: 'image/jpeg' });
+      const result = await extractFromImage(file, 'business-card');
+      const card = result.entries[0] as any;
+
+      expect(card.company).toBe('THAI SPA PAVILION');
+      expect(card.fullName).toBe('');
+    });
+
+    it('rejects invalid website junk and keeps raw in extra fields', async () => {
+      const mockResponse = {
+        status: 'complete',
+        structure: 'single-entity',
+        detectedHeaders: ['Website', 'Email'],
+        headerMapping: [],
+        confidence: 0.78,
+        card: {
+          id: 'bad-website',
+          fullName: 'Sade Warren',
+          website: 'CRIME STOPPERS OF FLINT & GENESEE COUNTY',
+          email: 'sade@example.org',
+          rawText: 'Sade Warren\nCRIME STOPPERS OF FLINT & GENESEE COUNTY',
+        },
+      };
+
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve(mockResponse) }));
+
+      const file = new File(['test'], 'bad-website.jpg', { type: 'image/jpeg' });
+      const result = await extractFromImage(file, 'business-card');
+      const card = result.entries[0] as any;
+
+      expect(card.website).toBe('');
+      expect(card.extraFields.websiteRejected).toBe('CRIME STOPPERS OF FLINT & GENESEE COUNTY');
+    });
+
+    it('removes phone numbers from address and moves extras into extraFields.additionalPhone', async () => {
+      const mockResponse = {
+        status: 'complete',
+        structure: 'single-entity',
+        detectedHeaders: ['Name', 'Address', 'Email'],
+        headerMapping: [],
+        confidence: 0.8,
+        card: {
+          id: 'address-phone',
+          fullName: 'Sade Warren',
+          address: '123 Main St (248) 335-8740\nDetroit, MI 48201',
+          phone: '313-555-0101',
+          email: 'sade@example.org',
+          rawText: 'Sade Warren\n123 Main St (248) 335-8740\nDetroit, MI 48201',
+        },
+      };
+
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve(mockResponse) }));
+
+      const file = new File(['test'], 'address-phone.jpg', { type: 'image/jpeg' });
+      const result = await extractFromImage(file, 'business-card');
+      const card = result.entries[0] as any;
+
+      expect(card.address).toBe('123 Main St Detroit, MI 48201');
+      expect(card.address).not.toMatch(/248\)?\s*335\s*-?\s*8740/);
+      expect(card.extraFields.additionalPhone).toContain('248');
+    });
+  });
 });

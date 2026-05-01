@@ -9,7 +9,13 @@ import {
   SignupEntry,
 } from '@/types/scan';
 import { getConfig } from '@/config/env';
-import { resolveFromRawText, isPlaceholder } from '@/lib/businessCardResolver';
+import {
+  cleanWebsite,
+  resolveFromRawText,
+  isPlaceholder,
+  scoreOrganizationCandidate,
+  scorePersonNameCandidate,
+} from '@/lib/businessCardResolver';
 
 interface SigninProcessResponse {
   status: string;
@@ -324,7 +330,7 @@ function withBusinessCardMetadata(item: BatchCardItem, rows: BusinessCardEntry[]
       scanMode: item.scanMode ?? 'single-card',
       frontBackStatus: item.back ? 'front-and-back' : 'front-only',
       confidence: row.confidence ?? item.confidence,
-      warnings: [...(item.warnings ?? []), ...(row.warnings ?? [])],
+      warnings: Array.from(new Set([...(item.warnings ?? []), ...(row.warnings ?? [])])),
       sourceType: item.front.sourceType,
       hasBack: Boolean(item.back),
       frontPreviewUrl: item.front.previewUrl,
@@ -449,8 +455,8 @@ function assessBusinessCardQuality(row: BusinessCardEntry): { confidence: number
 
   return {
     confidence,
-    warnings,
-    needsReview: warnings.length > 0,
+    warnings: Array.from(new Set(warnings)),
+    needsReview: Array.from(new Set(warnings)).length > 0,
   };
 }
 
@@ -1758,6 +1764,17 @@ function looksLikeOrgName(name: string): boolean {
   return false;
 }
 
+function extractPhoneLikeValues(value: string): string[] {
+  if (!value) return [];
+  const matches = value.match(/(?:\+?\d[\d\s()./-]{8,}\d)/g) ?? [];
+  return Array.from(new Set(matches.map((match) => match.trim())))
+    .filter((match) => match.replace(/\D/g, '').length >= 10);
+}
+
+function normalizePhoneDigits(value: string): string {
+  return (value ?? '').replace(/\D/g, '');
+}
+
 function mapBusinessCard(card: Record<string, unknown>): BusinessCardEntry {
   const cardExtra = (card.extraFields ?? {}) as Record<string, unknown>;
   const mergedSource: Record<string, unknown> = {
@@ -1835,7 +1852,10 @@ function mapBusinessCard(card: Record<string, unknown>): BusinessCardEntry {
   // For website: preserve the structured API value as-is (it may include https://).
   // Only fall back to the resolver's cleaned domain when no structured value exists.
   const structuredWebsite = (mapped.website || fallbackWebsite).trim();
-  const finalWebsite = structuredWebsite || resolved.website || '';
+  const cleanedStructuredWebsite = structuredWebsite ? cleanWebsite(structuredWebsite) : '';
+  const finalWebsite = cleanedStructuredWebsite
+    ? structuredWebsite
+    : resolved.website || '';
 
   // For company: prefer structured API result.
   // Only use resolver's company when there was NO company data from the API at all
@@ -1847,31 +1867,53 @@ function mapBusinessCard(card: Record<string, unknown>): BusinessCardEntry {
   // Domain-inferred company is a reliable signal — allow it through even when
   // the API supplied company data, provided the API result was weak or empty.
   const domainInferredCompany = resolved.inferredCompanySource === 'domain' ? (resolved.company ?? '') : '';
-  const finalCompany = (resolvedCompany && !apiCompanyIsWeak)
+  let finalCompany = (resolvedCompany && !apiCompanyIsWeak)
     ? resolvedCompany
     : domainInferredCompany || resolvedCompany || (!hadApiCompanyData ? resolved.company ?? '' : '') || '';
 
   // For fullName: prefer structured API result UNLESS it looks like an org name,
   // in which case fall back to the resolver's name.
   const apiFullName = splitName.fullName || resolvedFullName;
-  const finalFullName = (apiFullName && !looksLikeOrgName(apiFullName))
+  let finalFullName = (apiFullName && !looksLikeOrgName(apiFullName))
     ? apiFullName
     : (resolved.fullName || apiFullName || '');
-  const finalFirstName = resolvedFirstName || resolved.firstName || '';
-  const finalLastName = resolvedLastName || resolved.lastName || '';
+  let finalFirstName = resolvedFirstName || resolved.firstName || '';
+  let finalLastName = resolvedLastName || resolved.lastName || '';
+
+  // Reclassify org/business-like "fullName" values into company.
+  if (apiFullName) {
+    const personScore = scorePersonNameCandidate(apiFullName);
+    const orgScore = scoreOrganizationCandidate(apiFullName);
+    if (orgScore > personScore) {
+      const existingCompanyScore = scoreOrganizationCandidate(finalCompany);
+      if (!finalCompany || orgScore >= existingCompanyScore) {
+        finalCompany = apiFullName;
+      }
+      finalFullName = resolved.fullName && scorePersonNameCandidate(resolved.fullName) >= orgScore
+        ? resolved.fullName
+        : '';
+      if (!finalFullName) {
+        finalFirstName = '';
+        finalLastName = '';
+      }
+    }
+  }
 
   // For address: structured first, then resolver.
-  const finalAddress = (mapped.address || fallbackAddress) || resolved.address || '';
+  let finalAddress = (mapped.address || fallbackAddress) || resolved.address || '';
 
   // For phone: structured first, then resolver. If the API phone matches the
   // resolver's fax number, prefer the resolver's non-fax phone instead.
   const apiPhone = (mapped.phone || fallbackPhone).trim();
-  const finalPhone = (apiPhone && apiPhone !== resolved.fax)
+  let finalPhone = (apiPhone && apiPhone !== resolved.fax)
     ? apiPhone
     : resolved.phone || apiPhone || '';
 
   // Move resolver's otherPhones into extraFields so they surface in review.
   const resolverExtras: Record<string, string> = {};
+  if (structuredWebsite && !cleanedStructuredWebsite) {
+    resolverExtras.websiteRejected = structuredWebsite;
+  }
   if (resolved.otherPhones?.length) {
     resolved.otherPhones.forEach((p, i) => {
       resolverExtras[`otherPhone${i > 0 ? i + 1 : ''}`] = p;
@@ -1905,6 +1947,35 @@ function mapBusinessCard(card: Record<string, unknown>): BusinessCardEntry {
     resolverExtras['tagline'] = resolved.tagline;
   }
 
+  // Ensure address does not keep phone numbers; move to phone or extra fields.
+  const addressPhones = extractPhoneLikeValues(finalAddress);
+  if (addressPhones.length > 0) {
+    finalAddress = finalAddress
+      .replace(/(?:\+?\d[\d\s()./-]{8,}\d)/g, ' ')
+      .replace(/\(\s*\)/g, ' ')
+      .replace(/\(\s+/g, ' ')
+      .replace(/\s+\)/g, ' ')
+      .replace(/\s{2,}/g, ' ')
+      .replace(/\n\s+/g, '\n')
+      .trim();
+
+    const currentDigits = normalizePhoneDigits(finalPhone);
+    const normalizedCandidates = addressPhones
+      .map((phoneNumber) => ({ raw: phoneNumber, digits: normalizePhoneDigits(phoneNumber) }))
+      .filter((item) => item.digits.length >= 10);
+
+    if (!currentDigits && normalizedCandidates[0]) {
+      finalPhone = normalizedCandidates[0].raw;
+    }
+
+    const extraPhones = normalizedCandidates
+      .filter((item) => item.digits && item.digits !== normalizePhoneDigits(finalPhone))
+      .map((item) => item.raw);
+    if (extraPhones.length > 0) {
+      resolverExtras.additionalPhone = extraPhones.join('; ');
+    }
+  }
+
   // ── Build needsReview / confidence from resolver signals ──────────────────
   const resolverNeedsReview = resolved.needsReview ?? false;
   const resolverReviewReasons = resolved.reviewReasons ?? [];
@@ -1912,7 +1983,7 @@ function mapBusinessCard(card: Record<string, unknown>): BusinessCardEntry {
   const resolverFieldConfidence = resolved.fieldConfidence;
 
   // Combine any review reasons from both API and resolver passes
-  const finalWarnings = [...(resolved.warnings ?? []), ...(resolverReviewReasons)];
+  const finalWarnings = Array.from(new Set([...(resolved.warnings ?? []), ...resolverReviewReasons]));
 
   return {
     id: String(card.id ?? crypto.randomUUID()),

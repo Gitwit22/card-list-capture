@@ -18,19 +18,33 @@ import { BusinessCardEntry, ExportStatus } from '@/types/scan';
 /** Loose email format check: must have localpart@domain.tld */
 const EMAIL_FORMAT_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
 
-/** A phone field should be mostly digits/punctuation, >= 10 digits total */
-function isValidPhone(value: string): boolean {
-  if (!value.trim()) return true; // empty is not invalid (just missing)
-  const digits = value.replace(/\D/g, '');
-  if (digits.length < 10) return false;
-  const alphaCount = (value.match(/[a-zA-Z]/g) ?? []).length;
-  return alphaCount <= digits.length; // more digits than alpha chars
+const WEBSITE_ALLOWED_TLDS = new Set([
+  'com', 'org', 'net', 'edu', 'gov', 'mil', 'io', 'co', 'us', 'ca', 'uk', 'biz',
+  'info', 'app', 'dev', 'ai', 'co.uk',
+]);
+
+function normalizeWebsiteInput(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\//i, '')
+    .replace(/^www\./i, '')
+    .split(/[\s/?#]/)[0] ?? '';
 }
 
-/** A website/domain should not contain multiple spaces or newlines */
+/** A website/domain must look like a real domain or URL host. */
 function isValidWebsite(value: string): boolean {
   if (!value.trim()) return true;
-  return !(/[\r\n]/.test(value)) && (value.match(/ /g) ?? []).length <= 2;
+  const host = normalizeWebsiteInput(value);
+  if (!host || host.includes(' ') || host.includes('@')) return false;
+  if (!/^[a-z0-9][a-z0-9.-]*\.[a-z]{2,}$/i.test(host)) return false;
+  if (/\.\./.test(host) || host.startsWith('.') || host.endsWith('.')) return false;
+
+  const parts = host.split('.').filter(Boolean);
+  if (parts.length < 2) return false;
+  const tld = parts.slice(-2).join('.');
+  const last = parts[parts.length - 1];
+  return WEBSITE_ALLOWED_TLDS.has(tld) || WEBSITE_ALLOWED_TLDS.has(last);
 }
 
 /**
@@ -40,26 +54,31 @@ function isValidWebsite(value: string): boolean {
  */
 function looksLikeOcrParagraph(value: string): boolean {
   if (!value) return false;
-  // Multiple newlines → likely a multi-field OCR dump
-  if (/\r?\n/.test(value)) return true;
-  // Very long single-line text in a structured field
-  if (value.length > 120) return true;
-  // Sentence-ending punctuation followed by text (. word pattern)
-  if (/\.\s+[A-Z]/.test(value)) return true;
+  const trimmed = value.trim();
+  if (!trimmed) return false;
+
+  const lines = trimmed.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  if (lines.length >= 3) return true;
+
+  if (trimmed.length >= 180) return true;
+
+  const punctuationSegments = trimmed.split(/[.;:]/).map((part) => part.trim()).filter((part) => part.length >= 20);
+  if (punctuationSegments.length >= 3) return true;
+
+  const labelHits = (
+    trimmed.match(/\b(name|phone|email|website|address|fax|mobile|office|tel|www|http)\b/gi)
+    ?? []
+  ).length;
+  if (labelHits >= 2 && trimmed.length >= 60) return true;
+
+  const hasEmail = /[^\s@]+@[^\s@]+\.[^\s@]+/.test(trimmed);
+  const hasUrl = /(https?:\/\/|www\.|\b[a-z0-9.-]+\.[a-z]{2,}\b)/i.test(trimmed);
+  const hasPhone = /\+?\d[\d\s()./-]{8,}\d/.test(trimmed);
+  const hasAddressPattern = /\b(ste|suite|street|st\.?|road|rd\.?|avenue|ave\.?|blvd|lane|ln\.?|mi|ca|tx|ny|fl)\b/i.test(trimmed);
+  const mixedSignals = [hasEmail, hasUrl, hasPhone, hasAddressPattern].filter(Boolean).length;
+  if (mixedSignals >= 2 && trimmed.length >= 45) return true;
+
   return false;
-}
-
-/**
- * Known placeholder labels that should never appear as field values.
- */
-const PLACEHOLDER_SET = new Set([
-  'company', 'email', 'website', 'address', 'phone', 'title',
-  'first name', 'last name', 'firstname', 'lastname', 'name',
-  'n/a', 'na', 'none', 'tbd', '—', '-',
-]);
-
-function isPlaceholderValue(value: string): boolean {
-  return PLACEHOLDER_SET.has(value.trim().toLowerCase());
 }
 
 // ─── Per-field validators ─────────────────────────────────────────────────────
@@ -78,20 +97,6 @@ function validateEmail(email: string): FieldValidationResult {
   if (looksLikeOcrParagraph(email)) {
     return { blocked: true, reasons: ['email_contains_ocr_paragraph'] };
   }
-  if (isPlaceholderValue(email)) {
-    return { blocked: true, reasons: ['email_is_placeholder'] };
-  }
-  return { blocked: false, reasons: [] };
-}
-
-function validatePhone(phone: string): FieldValidationResult {
-  if (!phone) return { blocked: false, reasons: [] };
-  if (!isValidPhone(phone)) {
-    return { blocked: true, reasons: ['invalid_phone_format'] };
-  }
-  if (looksLikeOcrParagraph(phone)) {
-    return { blocked: true, reasons: ['phone_contains_ocr_paragraph'] };
-  }
   return { blocked: false, reasons: [] };
 }
 
@@ -108,9 +113,6 @@ function validateStructuredField(
   fieldName: string,
 ): FieldValidationResult {
   if (!value) return { blocked: false, reasons: [] };
-  if (isPlaceholderValue(value)) {
-    return { blocked: true, reasons: [`${fieldName}_is_placeholder`] };
-  }
   if (looksLikeOcrParagraph(value)) {
     return { blocked: true, reasons: [`${fieldName}_contains_ocr_paragraph`] };
   }
@@ -150,17 +152,9 @@ export function validateCardForExport(
   const blockedReasons: string[] = [];
   const warningReasons: string[] = [];
 
-  // ── Explicit exclusion ────────────────────────────────────────────────────
-  if (card.excludeFromExport) {
-    blockedReasons.push('excluded_by_user');
-  }
-
   // ── Field-level validation ────────────────────────────────────────────────
   const emailResult = validateEmail(card.email ?? '');
   if (emailResult.blocked) blockedReasons.push(...emailResult.reasons);
-
-  const phoneResult = validatePhone(card.phone ?? '');
-  if (phoneResult.blocked) blockedReasons.push(...phoneResult.reasons);
 
   const websiteResult = validateWebsite(card.website ?? '');
   if (websiteResult.blocked) blockedReasons.push(...websiteResult.reasons);
@@ -183,43 +177,12 @@ export function validateCardForExport(
     blockedReasons.push('no_identifying_info');
   }
 
-  // ── Required field check ──────────────────────────────────────────────────
-  for (const field of cfg.requiredFields) {
-    switch (field) {
-      case 'name':
-        if (!hasName) blockedReasons.push('required_field_missing:name');
-        break;
-      case 'company':
-        if (!hasCompany) blockedReasons.push('required_field_missing:company');
-        break;
-      case 'email':
-        if (!card.email?.trim()) blockedReasons.push('required_field_missing:email');
-        break;
-      case 'phone':
-        if (!card.phone?.trim()) blockedReasons.push('required_field_missing:phone');
-        break;
-      case 'website':
-        if (!card.website?.trim()) blockedReasons.push('required_field_missing:website');
-        break;
-    }
-  }
-
   // ── Warning conditions ────────────────────────────────────────────────────
-
-  // Failed extraction
-  if (card.status === 'failed') {
-    warningReasons.push('extraction_failed');
-  }
 
   // Low confidence
   const conf = card.confidence ?? 0;
   if (conf > 0 && conf < cfg.warningConfidenceThreshold) {
     warningReasons.push('low_confidence');
-  }
-
-  // Conflict fields
-  if ((card.conflictFields?.length ?? 0) > 0) {
-    warningReasons.push('has_conflict_fields');
   }
 
   // Missing contact method (no email + no phone + no website)
@@ -228,33 +191,34 @@ export function validateCardForExport(
     warningReasons.push('no_contact_method');
   }
 
-  // Title is a useful field, but less critical when a person name is already present.
-  // Only flag missing title when the card has no person name (e.g., org-only or brand cards).
-  if (!card.title?.trim() && !hasName) warningReasons.push('missing_title');
   if (!card.address?.trim()) warningReasons.push('missing_address');
 
-  // Unresolved duplicate
-  if (card.duplicateOf && card.duplicateStatus !== 'ignored') {
-    warningReasons.push('unresolved_duplicate');
-  }
-
   // Needs manual review
-  if (card.needsReview && !card.userEdited?.size) {
+  if (card.needsReview) {
     warningReasons.push('needs_review');
   }
 
-  // ── Determine status ──────────────────────────────────────────────────────
-  if (blockedReasons.length > 0) {
-    return { status: 'export_blocked', blockedReasons, warningReasons };
+  // Multiple likely candidates should stay warning-level, not blocked.
+  if (card.warnings?.includes('conflicting_name_candidates')) {
+    warningReasons.push('multiple_name_candidates');
+  }
+  if (card.warnings?.includes('conflicting_company_candidates')) {
+    warningReasons.push('multiple_company_candidates');
   }
 
-  // Ready: has identifying info (name, company, or title) AND at least one contact method
-  const isReady = hasIdentifying && hasContact;
-  if (isReady && warningReasons.length === 0) {
+  const uniqueBlockedReasons = Array.from(new Set(blockedReasons));
+  const uniqueWarningReasons = Array.from(new Set(warningReasons));
+
+  // ── Determine status ──────────────────────────────────────────────────────
+  if (uniqueBlockedReasons.length > 0) {
+    return { status: 'export_blocked', blockedReasons: uniqueBlockedReasons, warningReasons: uniqueWarningReasons };
+  }
+
+  if (uniqueWarningReasons.length === 0) {
     return { status: 'ready_to_export', blockedReasons: [], warningReasons: [] };
   }
 
-  return { status: 'export_warning', blockedReasons: [], warningReasons };
+  return { status: 'export_warning', blockedReasons: [], warningReasons: uniqueWarningReasons };
 }
 
 /**
@@ -339,6 +303,8 @@ export function humanizeExportReason(reason: string): string {
     no_contact_method: 'No email, phone, or website',
     missing_title: 'No job title',
     missing_address: 'No address',
+    multiple_name_candidates: 'Multiple likely person names — verify',
+    multiple_company_candidates: 'Multiple likely company candidates — verify',
     unresolved_duplicate: 'Possible duplicate not resolved',
     needs_review: 'Flagged for review',
   };

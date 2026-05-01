@@ -106,6 +106,11 @@ function makeCardImageSide(capture: QueuedCapture): CardImageSide {
   };
 }
 
+function dedupeWarnings(warnings: string[] | undefined): string[] {
+  if (!warnings || warnings.length === 0) return [];
+  return Array.from(new Set(warnings.map((warning) => warning.trim()).filter(Boolean)));
+}
+
 function inferPairKey(filename?: string): string | null {
   if (!filename) return null;
   const base = filename.replace(/\.[^.]+$/, '').toLowerCase();
@@ -510,7 +515,7 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
           cropImageUrl: row.cropImageUrl ?? item.front.previewUrl,
           scanMode: row.scanMode ?? item.scanMode ?? 'single-card',
           confidence: row.confidence ?? item.confidence,
-          warnings: [...(item.warnings ?? []), ...(row.warnings ?? [])],
+          warnings: dedupeWarnings([...(item.warnings ?? []), ...(row.warnings ?? [])]),
           sourceType: row.sourceType ?? item.front.sourceType,
           hasBack: row.hasBack ?? Boolean(item.back),
           frontPreviewUrl: row.frontPreviewUrl ?? item.front.previewUrl,
@@ -575,7 +580,7 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
         debug: Boolean(import.meta.env.DEV),
         enableDebugOverlay: showDeveloperDebugOverlay,
       });
-      const detectionWarnings = [...detection.warnings];
+      const detectionWarnings = dedupeWarnings([...detection.warnings]);
 
       setDetectionDebugBySource((current) => ({
         ...current,
@@ -602,7 +607,7 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
       setDetectedCardCrops((current) => current.filter((crop) => crop.sourceImageId !== sourceImageId));
 
       if (detectionWarnings.length > 0) {
-        detectionWarnings.forEach((warning) => toast.warning(warning));
+        dedupeWarnings(detectionWarnings).forEach((warning) => toast.warning(warning));
       }
 
       if (detection.crops.length === 0) {
@@ -642,7 +647,7 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
         sourceImageUrl: capture.previewUrl,
         cropIndex: crop.cropIndex,
         scanMode: 'multi-card',
-        warnings: [...detectionWarnings, ...crop.warnings],
+        warnings: dedupeWarnings([...detectionWarnings, ...crop.warnings]),
         confidence: crop.confidence,
         status: 'queued',
         error: undefined,
@@ -1446,7 +1451,12 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
   }, []);
 
   const handleDataChange = useCallback((rows: BusinessCardEntry[]) => {
-    const cards = rows;
+    const cards = validateBatch(runBatchAnalysis(rows, sessionCorrections)).map((card) => ({
+      ...card,
+      warnings: dedupeWarnings(card.warnings),
+      exportBlockedReasons: dedupeWarnings(card.exportBlockedReasons),
+      exportWarningReasons: dedupeWarnings(card.exportWarningReasons),
+    }));
     setData(cards);
     // Rebuild correction suggestions for any user-edited company fields
     const context = analyzeBatch(cards);
@@ -1466,7 +1476,7 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
     if (Object.keys(suggestions).length > 0) {
       setBatchCorrectionSuggestions(suggestions);
     }
-  }, []);
+  }, [sessionCorrections]);
 
   // ── Export (Phase 3: preview before download) ─────────────────────────────
 

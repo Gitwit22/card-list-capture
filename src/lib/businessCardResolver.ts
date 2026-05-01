@@ -56,6 +56,11 @@ const ORG_LINE_KEYWORDS = /\b(department|county|township|parish|borough|city of|
 // separate roles — ORG_LINE_KEYWORDS drives org-hierarchy stacking while
 // COMPANY_ORG_KEYWORD_RE guards name-candidate filtering for mixed-case lines.
 const COMPANY_ORG_KEYWORD_RE = /\b(inc\.?|llc\.?|ltd\.?|corp\.?|foundation|police|league|fundraising|senate|legislature|representatives|ministries|nonprofit|associates|authority|commission|council)\b/i;
+const ENTITY_KEYWORD_RE = /\b(llc|inc\.?|foundation|coalition|committee|ministry|church|project|pavilion|spa|studio|company|co\.?|group|association|organization|center|centre|program|services|community|restaurant|shop|store|agency|council|school|university|institute|salon|barbershop|nonprofit|nfp|corp\.?|corporation)\b/i;
+const WEBSITE_ALLOWED_TLDS = new Set([
+  'com', 'org', 'net', 'edu', 'gov', 'mil', 'io', 'co', 'us', 'ca', 'uk', 'biz',
+  'info', 'app', 'dev', 'ai', 'co.uk',
+]);
 
 // ─── Shared P.O. Box pattern ─────────────────────────────────────────────────
 const PO_BOX_RE = /^P\.?\s*O\.?\s*Box/i;
@@ -305,6 +310,17 @@ export function cleanWebsite(raw: string): string {
   // Reject if contains spaces (OCR junk merged in)
   if (domain.includes(' ')) return '';
 
+  if (!/^[a-z0-9][a-z0-9.-]*\.[a-z]{2,}(?:\/.*)?$/i.test(domain)) return '';
+
+  const host = (domain.split('/')[0] ?? '').toLowerCase();
+  if (!host || host.includes('..') || host.startsWith('.') || host.endsWith('.')) return '';
+
+  const parts = host.split('.').filter(Boolean);
+  if (parts.length < 2) return '';
+  const tld = parts.slice(-2).join('.');
+  const last = parts[parts.length - 1];
+  if (!WEBSITE_ALLOWED_TLDS.has(tld) && !WEBSITE_ALLOWED_TLDS.has(last)) return '';
+
   return domain.toLowerCase();
 }
 
@@ -531,6 +547,46 @@ function scoreNameCandidate(name: string, emailLocalPart: string): number {
 
   // Penalise lines containing job-title keywords (likely a title, not a name)
   if (TITLE_ROLE_KEYWORDS.test(name)) score -= 3;
+
+  return score;
+}
+
+export function scorePersonNameCandidate(value: string): number {
+  const trimmed = value.trim();
+  if (!trimmed) return 0;
+
+  let score = 0;
+  const words = trimmed.split(/\s+/).filter(Boolean);
+  const upperWords = words.filter((w) => /^[A-Z0-9&.'-]+$/.test(w) && w === w.toUpperCase()).length;
+
+  if (hasHonorific(trimmed)) score += 4;
+  if (words.length >= 2 && words.length <= 4) score += 2;
+  if (words.every((w) => /^[A-Z][a-z'.-]+$/.test(w) || /^[A-Z][a-z]+-[A-Z][a-z]+$/.test(w))) score += 3;
+  if (!ENTITY_KEYWORD_RE.test(trimmed)) score += 2;
+
+  if (isOrgLine(trimmed)) score -= 5;
+  if (ENTITY_KEYWORD_RE.test(trimmed)) score -= 4;
+  if (upperWords >= Math.max(2, words.length - 1)) score -= 2;
+  if (/\d/.test(trimmed)) score -= 2;
+
+  return score;
+}
+
+export function scoreOrganizationCandidate(value: string): number {
+  const trimmed = value.trim();
+  if (!trimmed) return 0;
+
+  let score = 0;
+  const words = trimmed.split(/\s+/).filter(Boolean);
+  const upperWords = words.filter((w) => /^[A-Z0-9&.'-]+$/.test(w) && w === w.toUpperCase()).length;
+
+  if (ENTITY_KEYWORD_RE.test(trimmed)) score += 5;
+  if (isOrgLine(trimmed)) score += 4;
+  if (upperWords >= Math.max(2, words.length - 1)) score += 2;
+  if (words.length >= 2) score += 1;
+
+  if (hasHonorific(trimmed)) score -= 3;
+  if (scoreNameCandidate(trimmed, '') >= 7) score -= 3;
 
   return score;
 }
@@ -985,7 +1041,7 @@ export function resolveFromRawText(rawText: string): Partial<ResolvedCard> {
   // ── 10. Placeholder cleaning ──────────────────────────────────────────────
   // Clear any field that ended up as a known placeholder label (e.g. "Company").
   const cleanCompany_raw = isPlaceholder(company) ? '' : company;
-  const cleanFullName = isPlaceholder(fullName) ? '' : fullName;
+  let cleanFullName = isPlaceholder(fullName) ? '' : fullName;
   const cleanTitle_raw = isPlaceholder(title) ? '' : title;
   const cleanPhone_raw = isPlaceholder(phone) ? '' : phone;
   const cleanEmail = isPlaceholder(email) ? '' : email;
@@ -994,8 +1050,8 @@ export function resolveFromRawText(rawText: string): Partial<ResolvedCard> {
 
   // When fullName resolves to a placeholder (e.g. "First Name"), clear firstName and lastName too.
   const fullNameWasPlaceholder = isPlaceholder(fullName);
-  const cleanFirstName = (fullNameWasPlaceholder || isPlaceholder(firstName)) ? '' : firstName;
-  const cleanLastName  = (fullNameWasPlaceholder || isPlaceholder(lastName))  ? '' : lastName;
+  let cleanFirstName = (fullNameWasPlaceholder || isPlaceholder(firstName)) ? '' : firstName;
+  let cleanLastName  = (fullNameWasPlaceholder || isPlaceholder(lastName))  ? '' : lastName;
 
   // ── 10b. Field contamination cleanup ─────────────────────────────────────
   // Website may not contain spaces, line breaks, or full OCR paragraphs.
@@ -1004,7 +1060,7 @@ export function resolveFromRawText(rawText: string): Partial<ResolvedCard> {
 
   // Phone may not contain letter-heavy or address-like text.
   const phoneContaminated = Boolean(cleanPhone_raw && sanitizePhone(cleanPhone_raw) !== cleanPhone_raw);
-  const cleanPhone = sanitizePhone(cleanPhone_raw);
+  let cleanPhone = sanitizePhone(cleanPhone_raw);
 
   // Title must not contain street/address patterns — move to address if found.
   const { title: cleanTitle_sanitized, movedAddress: titleMovedAddress } = sanitizeTitle(cleanTitle_raw);
@@ -1014,12 +1070,52 @@ export function resolveFromRawText(rawText: string): Partial<ResolvedCard> {
   // Company must not be a street address — move to address if found.
   const { company: cleanCompany_sanitized, movedAddress: companyMovedAddress } = sanitizeCompany(cleanCompany_raw);
   const companyContaminated = Boolean(companyMovedAddress);
-  const cleanCompany = cleanCompany_sanitized;
+  let cleanCompany = cleanCompany_sanitized;
+  let nameReclassifiedAsCompany = false;
 
   // If title or company had address fragments, merge them into the address field.
   let cleanAddress = cleanAddress_raw;
   if (!cleanAddress && (titleMovedAddress || companyMovedAddress)) {
     cleanAddress = titleMovedAddress || companyMovedAddress;
+  }
+
+  // Remove phone-like values from address and move to phone/otherPhones when needed.
+  if (cleanAddress) {
+    const phoneCandidates = Array.from(new Set(cleanAddress.match(PHONE_RE)?.map((p) => p.trim()) ?? []))
+      .filter((candidate) => candidate.replace(/\D/g, '').length >= 10);
+    if (phoneCandidates.length > 0) {
+      cleanAddress = cleanAddress
+        .replace(PHONE_RE, ' ')
+        .replace(/\s{2,}/g, ' ')
+        .replace(/\n\s+/g, '\n')
+        .trim();
+
+      if (!cleanPhone && phoneCandidates[0]) {
+        cleanPhone = sanitizePhone(phoneCandidates[0]);
+      }
+      if (phoneCandidates.length > 1) {
+        otherPhones.push(...phoneCandidates.slice(1));
+      } else if (cleanPhone && cleanPhone !== phoneCandidates[0]) {
+        otherPhones.push(phoneCandidates[0]);
+      }
+    }
+  }
+
+  // If person-name slot contains an organization-like value, move it to company.
+  if (cleanFullName) {
+    const personScore = scorePersonNameCandidate(cleanFullName);
+    const orgScore = scoreOrganizationCandidate(cleanFullName);
+    const companyStrength = scoreOrganizationCandidate(cleanCompany);
+
+    if (orgScore > personScore && companyStrength < orgScore) {
+      if (!cleanCompany || companyStrength < orgScore) {
+        cleanCompany = cleanFullName;
+      }
+      cleanFullName = '';
+      cleanFirstName = '';
+      cleanLastName = '';
+      nameReclassifiedAsCompany = true;
+    }
   }
 
   // ── 11. Per-field confidence scoring ─────────────────────────────────────
@@ -1101,6 +1197,7 @@ export function resolveFromRawText(rawText: string): Partial<ResolvedCard> {
   if (titleContaminated) reviewReasons.push('title_address_moved');
   if (companyContaminated) reviewReasons.push('company_address_moved');
   if (nameCandidates.length > 2) reviewReasons.push('multiple_name_candidates');
+  if (nameReclassifiedAsCompany) reviewReasons.push('name_reclassified_as_company');
 
   const needsReview = reviewReasons.length > 0;
 

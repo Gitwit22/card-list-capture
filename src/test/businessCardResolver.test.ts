@@ -219,6 +219,42 @@ describe('website extraction rejects junk', () => {
     const result = resolveFromRawText(raw);
     expect(result.website).toBe('henryford.com');
   });
+
+  it('rejects non-domain junk like dayday.warren', () => {
+    const raw = 'Sade Warren\nPresident\ndayday.warren\n(248) 335-8740';
+    const result = resolveFromRawText(raw);
+    expect(result.website).toBe('');
+  });
+});
+
+describe('organization/name and address cleanup', () => {
+  it('keeps organization-like all-caps value in company, not fullName', () => {
+    const raw = 'CRIME STOPPERS\nThe West Oakland Mural Project\n(248) 335-8740\ninfo@crimestoppers.org';
+    const result = resolveFromRawText(raw);
+    expect(result.fullName).toBe('');
+    expect(result.company?.toLowerCase()).toContain('crime stoppers');
+  });
+
+  it('classifies THAI SPA PAVILION as company', () => {
+    const raw = 'THAI SPA PAVILION\n(248) 335-8740\ncontact@thaispapavilion.com';
+    const result = resolveFromRawText(raw);
+    expect(result.fullName).toBe('');
+    expect(result.company?.toLowerCase()).toContain('thai spa pavilion');
+  });
+
+  it('removes phone-like content from address and keeps phone outside address', () => {
+    const raw = [
+      'Sade Warren',
+      'President',
+      '(248) 335-8740',
+      '123 Main St (248) 335-8740',
+      'Detroit, MI 48201',
+      'sade@example.com',
+    ].join('\n');
+    const result = resolveFromRawText(raw);
+    expect(result.phone.replace(/\D/g, '')).toBe('2483358740');
+    expect(result.address).not.toMatch(/248\)?\s*335\s*-?\s*8740/);
+  });
 });
 
 // ─── resolveFromRawText — Michigan DHHS card ──────────────────────────────────

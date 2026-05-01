@@ -220,14 +220,18 @@ export function getBusinessCardExportColumnGroups(data: BusinessCardEntry[]): Ex
   const allColumns = getExportColumns(data, 'business-card');
   const detected = getDetectedColumns(rows);
 
-  const advancedColumns = allColumns.filter((column) => ADVANCED_BUSINESS_CARD_COLUMNS.has(column));
-  const defaultColumns = allColumns.filter((column) => {
+  // Only expose selectable columns that actually have values in this export.
+  // This keeps the UI focused and avoids showing many always-empty fields.
+  const populatedColumns = allColumns.filter((column) => detected.has(column));
+
+  const advancedColumns = populatedColumns.filter((column) => ADVANCED_BUSINESS_CARD_COLUMNS.has(column));
+  const defaultColumns = populatedColumns.filter((column) => {
     if (ADVANCED_BUSINESS_CARD_COLUMNS.has(column)) return false;
     return CORE_BUSINESS_CARD_COLUMNS.has(column) || detected.has(column);
   });
 
   return {
-    allColumns,
+    allColumns: populatedColumns,
     defaultColumns,
     advancedColumns,
   };

@@ -728,7 +728,11 @@ export function runBatchAnalysis(
   updated = updated.map((card) => {
     const candidates = buildFieldCandidates(card);
     const withCandidates = { ...card, candidates };
-    return injectConflictReasons(withCandidates, candidates);
+    const withConflicts = injectConflictReasons(withCandidates, candidates);
+    return {
+      ...withConflicts,
+      warnings: Array.from(new Set(withConflicts.warnings ?? [])),
+    };
   });
 
   return updated;

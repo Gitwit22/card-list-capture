@@ -57,6 +57,7 @@ function humanizeReason(reason: string): string {
     phone_contamination_cleaned: 'Phone field had non-phone text',
     title_address_moved: 'Address fragment removed from title',
     company_address_moved: 'Address fragment removed from company',
+    name_reclassified_as_company: 'Organization name moved from Full Name to Company',
     multiple_name_candidates: 'Multiple possible person names detected',
     conflicting_name_candidates: 'Conflicting name candidates — verify',
     conflicting_company_candidates: 'Conflicting company candidates — verify',
@@ -459,7 +460,7 @@ export function DataReview({
                     <Ban className="w-3 h-3" />Export blocked:
                   </p>
                   <ul className="list-disc list-inside space-y-0.5">
-                    {card.exportBlockedReasons!.map((r) => (
+                    {Array.from(new Set(card.exportBlockedReasons!)).map((r) => (
                       <li key={r} className="text-xs text-red-600 dark:text-red-400">{humanizeExportReason(r)}</li>
                     ))}
                   </ul>
@@ -473,11 +474,11 @@ export function DataReview({
                     <ShieldAlert className="w-3 h-3" />Export warnings:
                   </p>
                   <ul className="list-disc list-inside space-y-0.5">
-                    {card.exportWarningReasons!.slice(0, 3).map((r) => (
+                    {Array.from(new Set(card.exportWarningReasons!)).slice(0, 3).map((r) => (
                       <li key={r} className="text-xs text-yellow-600 dark:text-yellow-400">{humanizeExportReason(r)}</li>
                     ))}
-                    {card.exportWarningReasons!.length > 3 && (
-                      <li className="text-xs text-yellow-500">+{card.exportWarningReasons!.length - 3} more</li>
+                    {Array.from(new Set(card.exportWarningReasons!)).length > 3 && (
+                      <li className="text-xs text-yellow-500">+{Array.from(new Set(card.exportWarningReasons!)).length - 3} more</li>
                     )}
                   </ul>
                 </div>
@@ -485,8 +486,8 @@ export function DataReview({
 
               {/* ── Review reasons ──────────────────────────────────────── */}
               {card && (() => {
-                const reasons = card.warnings?.filter((w) => w && !w.startsWith('fax_') && !w.startsWith('company_batch_boosted_from:') && !w.startsWith('duplicate_')) ?? [];
-                const batchBoosts = card.warnings?.filter((w) => w.startsWith('company_batch_boosted_from:')) ?? [];
+                const reasons = Array.from(new Set(card.warnings?.filter((w) => w && !w.startsWith('fax_') && !w.startsWith('company_batch_boosted_from:') && !w.startsWith('duplicate_')) ?? []));
+                const batchBoosts = Array.from(new Set(card.warnings?.filter((w) => w.startsWith('company_batch_boosted_from:')) ?? []));
                 if (reasons.length === 0 && batchBoosts.length === 0) return null;
                 return (
                   <div className="mb-3 flex flex-wrap gap-1">
