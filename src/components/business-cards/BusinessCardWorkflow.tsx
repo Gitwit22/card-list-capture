@@ -446,6 +446,11 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
     toast.success('Session restored. Review your queue and continue.');
   }, [pendingSession]);
 
+  const handleResumeToQueue = useCallback(async () => {
+    await handleResumeSession();
+    setStep('batch-queue');
+  }, [handleResumeSession]);
+
   const handleDiscardSession = useCallback(async () => {
     setPendingSession(null);
     await clearSession().catch(() => null);
@@ -1642,6 +1647,7 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
           <SessionBanner
             session={pendingSession}
             onResume={handleResumeSession}
+            onResumeToQueue={handleResumeToQueue}
             onDiscard={handleDiscardSession}
           />
         )}
