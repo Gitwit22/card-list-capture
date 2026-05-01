@@ -1,11 +1,10 @@
-import { HardDrive, List, RefreshCw, Trash2 } from 'lucide-react';
+import { HardDrive, RefreshCw, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import type { LocalDraftSession } from '@/lib/sessionStore';
 
 interface SessionBannerProps {
   session: LocalDraftSession;
   onResume: () => void;
-  onResumeToQueue: () => void;
   onDiscard: () => void;
 }
 
@@ -23,7 +22,7 @@ function formatRelativeTime(iso: string): string {
   }
 }
 
-export function SessionBanner({ session, onResume, onResumeToQueue, onDiscard }: SessionBannerProps) {
+export function SessionBanner({ session, onResume, onDiscard }: SessionBannerProps) {
   const cardCount = session.batchQueue.length;
   const when = formatRelativeTime(session.updatedAt);
 
@@ -47,10 +46,6 @@ export function SessionBanner({ session, onResume, onResumeToQueue, onDiscard }:
         <Button type="button" size="sm" onClick={onResume} className="gap-1.5">
           <RefreshCw className="w-3.5 h-3.5" />
           Resume Last Session
-        </Button>
-        <Button type="button" size="sm" variant="outline" onClick={onResumeToQueue} className="gap-1.5">
-          <List className="w-3.5 h-3.5" />
-          Resume & View Queue
         </Button>
         <Button
           type="button"

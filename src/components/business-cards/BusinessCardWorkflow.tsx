@@ -119,6 +119,7 @@ function inferPairKey(filename?: string): string | null {
 export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWorkflowProps) {
   const navigate = useNavigate();
   const [step, setStep] = useState<Step>('capture');
+  const [showQueueShortcut, setShowQueueShortcut] = useState(false);
   const [scanMode, setScanMode] = useState<ScanMode>('single-card');
   const [data, setData] = useState<BusinessCardEntry[]>([]);
   const [batchQueue, setBatchQueue] = useState<BatchCardItem[]>([]);
@@ -442,14 +443,12 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
         ? 'batch-queue'
         : session.step;
     setStep(restoredStep);
+    if (restoredStep !== 'batch-queue' && rebuiltQueue.length > 0) {
+      setShowQueueShortcut(true);
+    }
 
     toast.success('Session restored. Review your queue and continue.');
   }, [pendingSession]);
-
-  const handleResumeToQueue = useCallback(async () => {
-    await handleResumeSession();
-    setStep('batch-queue');
-  }, [handleResumeSession]);
 
   const handleDiscardSession = useCallback(async () => {
     setPendingSession(null);
@@ -1647,9 +1646,26 @@ export function BusinessCardWorkflow({ mode, title, subtitle }: BusinessCardWork
           <SessionBanner
             session={pendingSession}
             onResume={handleResumeSession}
-            onResumeToQueue={handleResumeToQueue}
             onDiscard={handleDiscardSession}
           />
+        )}
+
+        {/* Post-resume queue shortcut */}
+        {showQueueShortcut && !pendingSession && step !== 'batch-queue' && (
+          <div className="flex items-center justify-between rounded-md border border-primary/30 bg-primary/5 px-3 py-2">
+            <p className="text-xs text-foreground">Session restored — your cards are in the queue.</p>
+            <Button
+              type="button"
+              size="sm"
+              className="ml-3 shrink-0"
+              onClick={() => {
+                setShowQueueShortcut(false);
+                setStep('batch-queue');
+              }}
+            >
+              View Queue
+            </Button>
+          </div>
         )}
 
         {/* Local-only privacy notice + clear session */}
