@@ -1095,7 +1095,7 @@ export function resolveFromRawText(rawText: string): Partial<ResolvedCard> {
   const lastName = nameParts.slice(1).join(' ');
 
   // Fix 4: Detect middle name when exactly 3 name parts are present.
-  // Middle part must be alphabetic only (no digits) to qualify.
+  // Middle part must be alphabetic only (no digits, including middle initials like "J.").
   let middleName: string | undefined;
   if (nameParts.length === 3 && /^[A-Za-z.'-]+$/.test(nameParts[1])) {
     middleName = nameParts[1];
@@ -1308,10 +1308,13 @@ export function resolveFromRawText(rawText: string): Partial<ResolvedCard> {
   const needsReview = reviewReasons.length > 0;
 
   // Fix 13: Capture secondary emails into extraFields
+  // Keys: secondaryEmail, secondaryEmail2, secondaryEmail3, …
+  // (first extra email gets no number suffix for backward compatibility)
   const secondaryEmails: Record<string, string> = {};
   if (emails.length > 1) {
     emails.slice(1).forEach((e, i) => {
-      secondaryEmails[i === 0 ? 'secondaryEmail' : `secondaryEmail${i + 1}`] = e;
+      const key = i === 0 ? 'secondaryEmail' : `secondaryEmail${i + 1}`;
+      secondaryEmails[key] = e;
     });
   }
 
