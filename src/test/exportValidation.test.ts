@@ -77,3 +77,20 @@ describe('exportValidation', () => {
     expect(result.status).toBe('export_warning');
   });
 });
+
+// Fix 16: tagline on top-level field
+describe('Fix 16 — tagline on the top-level BusinessCardEntry field', () => {
+  it('card with tagline set does not block export', () => {
+    const card = makeCard({ tagline: 'Building a better community' });
+    const result = validateCardForExport(card);
+    // tagline should not cause any export blocker
+    expect(result.blockedReasons).not.toContain('invalid_website_format');
+    expect(result.status).not.toBe('export_blocked');
+  });
+
+  it('tagline is preserved as a top-level string field', () => {
+    const card = makeCard({ tagline: 'Empowering Neighborhoods' });
+    expect(card.tagline).toBe('Empowering Neighborhoods');
+    expect(typeof card.tagline).toBe('string');
+  });
+});

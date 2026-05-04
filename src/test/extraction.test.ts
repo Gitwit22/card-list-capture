@@ -780,3 +780,150 @@ describe('extraction', () => {
     });
   });
 });
+
+// ─── Phase 6 — extraction.ts fixes ───────────────────────────────────────────
+
+describe('mapBusinessCard — email fixes (Fix 14, Fix 15)', () => {
+  beforeEach(() => {
+    vi.stubEnv('VITE_DOC_INTEL_URL', 'https://mock.api');
+    vi.stubEnv('VITE_DOC_INTEL_TOKEN', 'mock-token');
+  });
+
+  it('Fix 14 — lowercases email from API', async () => {
+    const mockResponse = {
+      status: 'complete',
+      structure: 'single-entity',
+      detectedHeaders: [],
+      headerMapping: [],
+      confidence: 0.9,
+      card: {
+        fullName: 'John Smith',
+        email: 'JOHN@EXAMPLE.COM',
+        phone: '313-555-0000',
+        company: 'Acme',
+        rawText: 'John Smith\nJOHN@EXAMPLE.COM',
+      },
+    };
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve(mockResponse) }));
+    const file = new File(['test'], 'card.jpg', { type: 'image/jpeg' });
+    const result = await extractFromImage(file, 'business-card');
+    const card = result.entries[0] as any;
+    expect(card.email).toBe('john@example.com');
+  });
+
+  it('Fix 15 — prefers resolver email when API email is malformed', async () => {
+    const mockResponse = {
+      status: 'complete',
+      structure: 'single-entity',
+      detectedHeaders: [],
+      headerMapping: [],
+      confidence: 0.9,
+      card: {
+        fullName: 'Jane Doe',
+        email: 'not-an-email',
+        phone: '313-555-0001',
+        company: 'Acme',
+        rawText: 'Jane Doe\njane@acme.com\n313-555-0001',
+      },
+    };
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve(mockResponse) }));
+    const file = new File(['test'], 'card.jpg', { type: 'image/jpeg' });
+    const result = await extractFromImage(file, 'business-card');
+    const card = result.entries[0] as any;
+    expect(card.email).toBe('jane@acme.com');
+  });
+});
+
+describe('mapBusinessCard — tagline top-level field (Fix 16)', () => {
+  beforeEach(() => {
+    vi.stubEnv('VITE_DOC_INTEL_URL', 'https://mock.api');
+    vi.stubEnv('VITE_DOC_INTEL_TOKEN', 'mock-token');
+  });
+
+  it('Fix 16 — tagline is written to the top-level field', async () => {
+    const mockResponse = {
+      status: 'complete',
+      structure: 'single-entity',
+      detectedHeaders: [],
+      headerMapping: [],
+      confidence: 0.9,
+      card: {
+        fullName: 'Christine Smith',
+        email: 'christine@ww.com',
+        phone: '313-433-5452',
+        rawText: [
+          'Professional Organizing',
+          'Specializing in DUO Services',
+          'Christine Smith',
+          'Owner',
+          'christine@ww.com',
+        ].join('\n'),
+      },
+    };
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve(mockResponse) }));
+    const file = new File(['test'], 'card.jpg', { type: 'image/jpeg' });
+    const result = await extractFromImage(file, 'business-card');
+    const card = result.entries[0] as any;
+    // tagline should be on the top-level field, not only in extraFields
+    expect(card.tagline).toBeTruthy();
+    expect(typeof card.tagline).toBe('string');
+  });
+});
+
+describe('mapBusinessCard — social handle fallback (Fix 17)', () => {
+  beforeEach(() => {
+    vi.stubEnv('VITE_DOC_INTEL_URL', 'https://mock.api');
+    vi.stubEnv('VITE_DOC_INTEL_TOKEN', 'mock-token');
+  });
+
+  it('Fix 17 — uses resolved.social when card.social is empty', async () => {
+    const mockResponse = {
+      status: 'complete',
+      structure: 'single-entity',
+      detectedHeaders: [],
+      headerMapping: [],
+      confidence: 0.9,
+      card: {
+        fullName: 'Jane Artist',
+        email: 'jane@art.com',
+        rawText: [
+          'Jane Artist',
+          'jane@art.com',
+          'instagram.com/janeartist',
+        ].join('\n'),
+      },
+    };
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve(mockResponse) }));
+    const file = new File(['test'], 'card.jpg', { type: 'image/jpeg' });
+    const result = await extractFromImage(file, 'business-card');
+    const card = result.entries[0] as any;
+    expect(card.social).toContain('instagram');
+  });
+});
+
+describe('mapBusinessCard — secondary email merging (Fix 13)', () => {
+  beforeEach(() => {
+    vi.stubEnv('VITE_DOC_INTEL_URL', 'https://mock.api');
+    vi.stubEnv('VITE_DOC_INTEL_TOKEN', 'mock-token');
+  });
+
+  it('Fix 13 — secondary email from resolver is in extraFields', async () => {
+    const mockResponse = {
+      status: 'complete',
+      structure: 'single-entity',
+      detectedHeaders: [],
+      headerMapping: [],
+      confidence: 0.9,
+      card: {
+        fullName: 'John Smith',
+        email: 'john@primary.com',
+        rawText: 'John Smith\njohn@primary.com\njohn@secondary.com',
+      },
+    };
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve(mockResponse) }));
+    const file = new File(['test'], 'card.jpg', { type: 'image/jpeg' });
+    const result = await extractFromImage(file, 'business-card');
+    const card = result.entries[0] as any;
+    expect(card.extraFields.secondaryEmail).toBe('john@secondary.com');
+  });
+});

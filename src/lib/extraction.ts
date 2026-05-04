@@ -15,6 +15,7 @@ import {
   isPlaceholder,
   scoreOrganizationCandidate,
   scorePersonNameCandidate,
+  PHONE_STRIP_RE,
 } from '@/lib/businessCardResolver';
 
 interface SigninProcessResponse {
@@ -1766,7 +1767,8 @@ function looksLikeOrgName(name: string): boolean {
 
 function extractPhoneLikeValues(value: string): string[] {
   if (!value) return [];
-  const matches = value.match(/(?:\+?\d[\d\s()./-]{8,}\d)/g) ?? [];
+  // Fix 9: Use PHONE_STRIP_RE (7-digit interior, shared with businessCardResolver)
+  const matches = value.match(PHONE_STRIP_RE) ?? [];
   return Array.from(new Set(matches.map((match) => match.trim())))
     .filter((match) => match.replace(/\D/g, '').length >= 10);
 }
@@ -1881,10 +1883,11 @@ function mapBusinessCard(card: Record<string, unknown>): BusinessCardEntry {
   let finalLastName = resolvedLastName || resolved.lastName || '';
 
   // Reclassify org/business-like "fullName" values into company.
+  // Fix 5: require margin of 2 to avoid misclassifying "Grace Health"-type names.
   if (apiFullName) {
     const personScore = scorePersonNameCandidate(apiFullName);
     const orgScore = scoreOrganizationCandidate(apiFullName);
-    if (orgScore > personScore) {
+    if (orgScore > personScore + 2) {
       const existingCompanyScore = scoreOrganizationCandidate(finalCompany);
       if (!finalCompany || orgScore >= existingCompanyScore) {
         finalCompany = apiFullName;
@@ -1943,15 +1946,23 @@ function mapBusinessCard(card: Record<string, unknown>): BusinessCardEntry {
   if (resolved.inferredCompanySource) {
     resolverExtras['inferredCompanySource'] = resolved.inferredCompanySource;
   }
-  if (resolved.tagline) {
-    resolverExtras['tagline'] = resolved.tagline;
+  // Fix 4: Store middle name from resolver into extraFields
+  if (resolved.middleName) {
+    resolverExtras['middleName'] = resolved.middleName;
+  }
+  // Fix 13: Merge secondary emails from resolver extraFields
+  for (const [key, value] of Object.entries(resolved.extraFields ?? {})) {
+    if (key.startsWith('secondaryEmail') && value) {
+      resolverExtras[key] = value;
+    }
   }
 
   // Ensure address does not keep phone numbers; move to phone or extra fields.
   const addressPhones = extractPhoneLikeValues(finalAddress);
   if (addressPhones.length > 0) {
+    // Fix 9: use shared PHONE_STRIP_RE instead of an inline variant
     finalAddress = finalAddress
-      .replace(/(?:\+?\d[\d\s()./-]{8,}\d)/g, ' ')
+      .replace(PHONE_STRIP_RE, ' ')
       .replace(/\(\s*\)/g, ' ')
       .replace(/\(\s+/g, ' ')
       .replace(/\s+\)/g, ' ')
@@ -1985,6 +1996,25 @@ function mapBusinessCard(card: Record<string, unknown>): BusinessCardEntry {
   // Combine any review reasons from both API and resolver passes
   const finalWarnings = Array.from(new Set([...(resolved.warnings ?? []), ...resolverReviewReasons]));
 
+  // Fix 14: Lowercase email consistently.
+  // Fix 15: Validate API email; prefer resolver email when API email is malformed.
+  const apiEmailRaw = (mapped.email || fallbackEmail).trim();
+  const apiEmailValid = apiEmailRaw && looksLikeEmail(apiEmailRaw);
+  const resolverEmailValid = resolved.email && looksLikeEmail(resolved.email);
+  const finalEmail = (apiEmailValid
+    ? apiEmailRaw
+    : (resolverEmailValid ? resolved.email : apiEmailRaw) || ''
+  ).toLowerCase();
+
+  // Fix 10: Website protocol convention — preserve the API's full URL (with https://) for
+  // structured values, and use the resolver's cleaned domain as fallback. This ensures
+  // batch records are uniform: API-provided URLs keep their protocol, resolver-derived ones
+  // are bare domains. Both are valid for downstream use.
+  const normalizedFinalWebsite = finalWebsite;
+
+  // Fix 17: Use resolved.social as fallback when card.social is empty.
+  const finalSocial = asCleanString(card.social) || resolved.social || '';
+
   return {
     id: String(card.id ?? crypto.randomUUID()),
     fullName: finalFullName,
@@ -1994,10 +2024,12 @@ function mapBusinessCard(card: Record<string, unknown>): BusinessCardEntry {
     company: finalCompany,
     title: mapped.jobTitle || fallbackTitle || resolved.title || '',
     phone: finalPhone,
-    email: mapped.email || fallbackEmail || resolved.email || '',
-    website: finalWebsite,
+    email: finalEmail,
+    website: normalizedFinalWebsite,
     address: finalAddress,
-    social: asCleanString(card.social),
+    social: finalSocial,
+    // Fix 16: Write tagline to top-level field instead of resolverExtras.
+    tagline: resolved.tagline || '',
     comment: asCleanString(card.comment),
     extraFields: { ...resolverExtras, ...extraFields },
     rawText: rawTextStr,
