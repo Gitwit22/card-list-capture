@@ -245,9 +245,14 @@ export function DataReview({
   })();
 
   // ── Visible entries after filter ─────────────────────────────────────────
-  const visibleData = (() => {
-    if (docType !== 'business-card' || !businessCardFilter || businessCardFilter === 'all') return data;
-    return (data as BusinessCardEntry[]).filter((card) => {
+  const visibleEntries = (() => {
+    const indexed = data.map((entry, index) => ({ entry, index }));
+    if (docType !== 'business-card' || !businessCardFilter || businessCardFilter === 'all') {
+      return indexed;
+    }
+
+    return indexed.filter(({ entry }) => {
+      const card = entry as BusinessCardEntry;
       if (businessCardFilter === 'failed') return card.status === 'failed';
       if (businessCardFilter === 'needs_review') return card.status !== 'failed' && (card.needsReview || card.status === 'needs_review');
       if (businessCardFilter === 'complete') return card.status !== 'failed' && !card.needsReview && card.status !== 'needs_review';
@@ -337,8 +342,7 @@ export function DataReview({
       )}
 
       <div className="space-y-3">
-        {visibleData.map((entry) => {
-          const realIndex = data.indexOf(entry);
+        {visibleEntries.map(({ entry, index: realIndex }) => {
           const isFocused = focusedCardId === entry.id;
           const card = docType === 'business-card' ? (entry as BusinessCardEntry) : null;
           const suggestions = card ? (batchCorrectionSuggestions?.[card.id] ?? []) : [];
@@ -346,7 +350,7 @@ export function DataReview({
 
           return (
             <div
-              key={entry.id}
+              key={`${entry.id}-${realIndex}`}
               ref={isFocused ? focusedRef : undefined}
               className={[
                 'bg-card rounded-lg border p-4 card-shadow transition-all',

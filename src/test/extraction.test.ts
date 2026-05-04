@@ -751,6 +751,55 @@ describe('extraction', () => {
       expect(card.extraFields.websiteRejected).toBe('CRIME STOPPERS OF FLINT & GENESEE COUNTY');
     });
 
+    it('keeps only the clean domain when website includes OCR-merged trailing text', async () => {
+      const mockResponse = {
+        status: 'complete',
+        structure: 'single-entity',
+        detectedHeaders: ['Website', 'Email'],
+        headerMapping: [],
+        confidence: 0.8,
+        card: {
+          id: 'merged-website-text',
+          fullName: 'Susan Stoney',
+          website: 'https://plymouthlibrary.org Susan Stoney Community Relations Specialist',
+          email: 'sstoney@plymouthlibrary.org',
+          rawText: 'Susan Stoney\nPLYMOUTH DISTRICT LIBRARY\nhttps://plymouthlibrary.org Susan Stoney',
+        },
+      };
+
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve(mockResponse) }));
+
+      const file = new File(['test'], 'merged-website.jpg', { type: 'image/jpeg' });
+      const result = await extractFromImage(file, 'business-card');
+      const card = result.entries[0] as any;
+
+      expect(card.website).toBe('plymouthlibrary.org');
+      expect(card.website).not.toMatch(/Susan/i);
+      expect(card.website).not.toContain(' ');
+    });
+
+    it('sanitizes website in /extract fallback mapping', async () => {
+      vi.stubGlobal('fetch', vi.fn()
+        .mockResolvedValueOnce({ ok: false, status: 500, json: () => Promise.resolve({}) })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: () => Promise.resolve({
+            status: 'complete',
+            fields: [
+              { key: 'fullName', value: 'Susan Stoney' },
+              { key: 'email', value: 'sstoney@plymouthlibrary.org' },
+              { key: 'website', value: 'PLYMOUTH DISTRICT LIBRARYSusan StoneyC' },
+            ],
+          }),
+        }));
+
+      const file = new File(['test'], 'fallback-website.jpg', { type: 'image/jpeg' });
+      const result = await extractFromImage(file, 'business-card');
+      const card = result.entries[0] as any;
+
+      expect(card.website).toBe('');
+    });
+
     it('removes phone numbers from address and moves extras into extraFields.additionalPhone', async () => {
       const mockResponse = {
         status: 'complete',

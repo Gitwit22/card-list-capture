@@ -228,6 +228,7 @@ export async function extractFromImage(
   };
 
   if (docType === 'business-card') {
+    const normalizedFallbackWebsite = cleanWebsite(fieldMap.website ?? '');
     return {
       entries: [
         {
@@ -239,7 +240,7 @@ export async function extractFromImage(
           title: fieldMap.title ?? '',
           phone: fieldMap.phone ?? '',
           email: fieldMap.email ?? '',
-          website: fieldMap.website ?? '',
+          website: normalizedFallbackWebsite,
           address: fieldMap.address ?? '',
           social: fieldMap.social ?? '',
           extraFields,
@@ -1777,6 +1778,21 @@ function normalizePhoneDigits(value: string): string {
   return (value ?? '').replace(/\D/g, '');
 }
 
+function isStrictWebsiteValue(value: string): boolean {
+  if (!value) return false;
+  const trimmed = value.trim();
+  if (!trimmed || /\s/.test(trimmed)) return false;
+  return /^(https?:\/\/)?(?:www\.)?[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+(?:\/[^\s<>\"]*)?$/i.test(trimmed);
+}
+
+function normalizeStructuredWebsiteValue(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return '';
+  const cleaned = cleanWebsite(trimmed);
+  if (!cleaned) return '';
+  return isStrictWebsiteValue(trimmed) ? trimmed : cleaned;
+}
+
 function mapBusinessCard(card: Record<string, unknown>): BusinessCardEntry {
   const cardExtra = (card.extraFields ?? {}) as Record<string, unknown>;
   const mergedSource: Record<string, unknown> = {
@@ -1851,13 +1867,11 @@ function mapBusinessCard(card: Record<string, unknown>): BusinessCardEntry {
   const rawTextStr = asCleanString(card.rawText);
   const resolved = rawTextStr ? resolveFromRawText(rawTextStr) : {};
 
-  // For website: preserve the structured API value as-is (it may include https://).
-  // Only fall back to the resolver's cleaned domain when no structured value exists.
+  // For website: keep structured URL only when it is a strict standalone URL/domain.
+  // If OCR merged extra text around a valid domain, prefer the cleaned domain.
   const structuredWebsite = (mapped.website || fallbackWebsite).trim();
-  const cleanedStructuredWebsite = structuredWebsite ? cleanWebsite(structuredWebsite) : '';
-  const finalWebsite = cleanedStructuredWebsite
-    ? structuredWebsite
-    : resolved.website || '';
+  const normalizedStructuredWebsite = normalizeStructuredWebsiteValue(structuredWebsite);
+  const finalWebsite = normalizedStructuredWebsite || resolved.website || '';
 
   // For company: prefer structured API result.
   // Only use resolver's company when there was NO company data from the API at all
@@ -1914,7 +1928,7 @@ function mapBusinessCard(card: Record<string, unknown>): BusinessCardEntry {
 
   // Move resolver's otherPhones into extraFields so they surface in review.
   const resolverExtras: Record<string, string> = {};
-  if (structuredWebsite && !cleanedStructuredWebsite) {
+  if (structuredWebsite && !normalizedStructuredWebsite) {
     resolverExtras.websiteRejected = structuredWebsite;
   }
   if (resolved.otherPhones?.length) {
