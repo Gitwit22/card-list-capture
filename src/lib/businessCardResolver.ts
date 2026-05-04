@@ -60,6 +60,10 @@ const ENTITY_KEYWORD_RE = /\b(llc|inc\.?|foundation|coalition|committee|ministry
 const WEBSITE_ALLOWED_TLDS = new Set([
   'com', 'org', 'net', 'edu', 'gov', 'mil', 'io', 'co', 'us', 'ca', 'uk', 'biz',
   'info', 'app', 'dev', 'ai', 'co.uk',
+  // Modern brand TLDs (Fix 12)
+  'tech', 'online', 'health', 'store', 'media', 'design', 'agency', 'solutions',
+  'consulting', 'cloud', 'digital', 'services', 'pro', 'live', 'show', 'studio',
+  'gallery', 'center', 'group',
 ]);
 
 // ─── Shared P.O. Box pattern ─────────────────────────────────────────────────
@@ -104,9 +108,18 @@ const ZIP_RE = /\b\d{5}(-\d{4})?\b/;
 
 // ─── Phone number pattern ─────────────────────────────────────────────────────
 const PHONE_RE = /(?:\+?\d[\d\s()./-]{7,}\d)/g;
+// Shared phone-stripping regex (Fix 9) — exported so extraction.ts can import it
+// Matches phone-like digit runs with >= 7 interior characters (10-digit minimum).
+export const PHONE_STRIP_RE = /(?:\+?\d[\d\s()./-]{7,}\d)/g;
 // Labels that identify the phone type; fax is handled separately
 const PHONE_LABEL_RE = /\b(mobile|cell|office|work|fax|direct|main|hq|toll\s*free|phone|tel|telephone)\b/i;
 const FAX_LABEL_RE = /\bfax\b/i;
+
+// ─── International postal code patterns (Fix 7) ────────────────────────────────
+// Canadian postal code: e.g. "K1A 0B1" or "K1A0B1"
+const CANADIAN_POSTAL_RE = /^[A-Z]\d[A-Z]\s?\d[A-Z]\d$/;
+// UK postcode: e.g. "SW1A 2AA" or "W1A 1AA"
+const UK_POSTCODE_RE = /^[A-Z]{1,2}\d{1,2}[A-Z]?\s?\d[A-Z]{2}$/;
 
 // ─── Generic email domains (domain name ≠ company name) ──────────────────────
 const GENERIC_EMAIL_DOMAINS = new Set([
@@ -230,11 +243,13 @@ function looksLikeDomain(line: string): boolean {
 }
 
 function looksLikeAddress(line: string): boolean {
-  return STREET_SUFFIX_RE.test(line) || PO_BOX_RE.test(line) || ZIP_RE.test(line) || CITY_STATE_ZIP_RE.test(line);
+  return STREET_SUFFIX_RE.test(line) || PO_BOX_RE.test(line) || ZIP_RE.test(line) || CITY_STATE_ZIP_RE.test(line)
+    || CANADIAN_POSTAL_RE.test(line.trim()) || UK_POSTCODE_RE.test(line.trim());
 }
 
 function looksLikeCityStateZip(line: string): boolean {
-  return CITY_STATE_ZIP_RE.test(line.trim());
+  const t = line.trim();
+  return CITY_STATE_ZIP_RE.test(t) || CANADIAN_POSTAL_RE.test(t) || UK_POSTCODE_RE.test(t);
 }
 
 function isBareState(line: string): boolean {
@@ -614,6 +629,9 @@ function isPersonNameCandidate(line: string): boolean {
   if (isOrgLine(trimmed)) return false;
   // Lines with company/org suffix keywords must never become person names
   if (COMPANY_ORG_KEYWORD_RE.test(trimmed)) return false;
+  // Lines with entity/organization indicator keywords must never become person names
+  // (e.g. "The West Oakland Mural Project" contains "project")
+  if (ENTITY_KEYWORD_RE.test(trimmed)) return false;
   // Service/category lines must never become person names
   if (isServiceOrCategoryLine(trimmed)) return false;
   // Tagline/slogan lines must never become person names
@@ -623,7 +641,9 @@ function isPersonNameCandidate(line: string): boolean {
   const { name } = stripCredentials(trimmed);
   const words = name.split(/\s+/).filter(Boolean);
 
-  if (words.length < 2 || words.length > 5) return false;
+  // Fix 1: allow single-word names (changed from < 2 to < 1)
+  // For single-word names, require honorific or email-name overlap (checked via scorer)
+  if (words.length < 1 || words.length > 5) return false;
 
   // Reject single service/category words
   if (words.length === 1 && SERVICE_WORDS.has(words[0].toLowerCase())) return false;
@@ -656,6 +676,7 @@ export interface ResolvedCard {
   fullName: string;
   firstName: string;
   lastName: string;
+  middleName?: string;
   credentials: string;
   company: string;
   department?: string;
@@ -672,6 +693,7 @@ export interface ResolvedCard {
   email: string;
   website: string;
   address: string;
+  social?: string;
   extraFields: Record<string, string>;
   warnings: string[];
   fieldConfidence?: ResolvedFieldConfidence;
@@ -741,14 +763,43 @@ export function resolveFromRawText(rawText: string): Partial<ResolvedCard> {
     .filter((p) => p.replace(/\s*(phone|tel|telephone|direct|office|work)$/i, '').trim() !== phone.trim());
 
   // ── 3. Extract website ────────────────────────────────────────────────────
+  // Fix 11: Known social media hosts are stored in extraFields.social, not website.
+  const SOCIAL_HOSTS = new Set(['linkedin.com', 'twitter.com', 'x.com', 'instagram.com', 'facebook.com', 'tiktok.com']);
   let website = '';
+  let socialUrl = '';
   for (const line of lines) {
     if (looksLikeEmail(line)) continue;
     if (looksLikePhone(line)) continue;
     const candidate = cleanWebsite(line);
-    if (candidate) {
-      website = candidate;
-      break;
+    if (!candidate) continue;
+    const host = candidate.split('/')[0].split('?')[0];
+    if (SOCIAL_HOSTS.has(host)) {
+      if (!socialUrl) socialUrl = candidate;
+      continue;
+    }
+    website = candidate;
+    break;
+  }
+
+  // Fix 17: Parse social handles from rawText.
+  // Check for known social URL patterns and @handle tokens (captured below in step 5+).
+  // socialUrl may already be set from the website scan above.
+  const SOCIAL_URL_RE = /(?:linkedin\.com\/(?:in|company)\/[^\s]+|twitter\.com\/[^\s]+|x\.com\/[^\s]+|instagram\.com\/[^\s]+|facebook\.com\/[^\s]+)/gi;
+  const HANDLE_RE = /(?:^|\s)@([A-Za-z0-9_.]{2,30})(?:\s|$)/;
+  if (!socialUrl) {
+    for (const line of lines) {
+      const socialMatch = line.match(SOCIAL_URL_RE);
+      if (socialMatch) {
+        socialUrl = socialMatch[0].trim();
+        break;
+      }
+      if (!socialUrl) {
+        const handleMatch = line.match(HANDLE_RE);
+        if (handleMatch) {
+          socialUrl = `@${handleMatch[1]}`;
+          break;
+        }
+      }
     }
   }
 
@@ -798,40 +849,53 @@ export function resolveFromRawText(rawText: string): Partial<ResolvedCard> {
 
       parts.push(anchor);
 
-      // Look forward for suite / floor line then city/state/ZIP
-      const next1 = lines[streetIdx + 1] ?? '';
-      const next2 = lines[streetIdx + 2] ?? '';
-      const next3 = lines[streetIdx + 3] ?? '';
-      if (SUITE_LINE_RE.test(next1)) {
-        parts.push(next1);
-        if (CITY_STATE_ZIP_RE.test(next2) || ZIP_RE.test(next2)) {
-          parts.push(next2);
+      // Fix 6: Extended address lookahead — scan up to 5 lines forward.
+      // Continue collecting while lines match a suite, continuation street, P.O. Box,
+      // international postal code, or city/state/ZIP. Stop at email/phone/website/name.
+      {
+        let scanIdx = streetIdx + 1;
+        const MAX_LOOKAHEAD = 5;
+        let foundCityZip = false;
+
+        for (let k = 0; k < MAX_LOOKAHEAD && scanIdx < lines.length; k++, scanIdx++) {
+          const candidate = lines[scanIdx];
+          if (!candidate) break;
+
+          // Stop conditions: these lines belong to other fields
+          if (looksLikeEmail(candidate)) break;
+          if (looksLikePhone(candidate) && !PHONE_LABEL_RE.test(candidate)) break;
+          if (looksLikeDomain(candidate) && !looksLikeAddress(candidate)) break;
+          if (isPersonNameCandidate(candidate)) break;
+
+          if (SUITE_LINE_RE.test(candidate)) {
+            parts.push(candidate);
+            continue;
+          }
+          if (PO_BOX_RE.test(candidate)) {
+            // Fix 8: Handle suite/floor after P.O. Box — keep scanning after collecting it.
+            parts.push(candidate);
+            continue;
+          }
+          if (looksLikeCityStateZip(candidate) || ZIP_RE.test(candidate)) {
+            parts.push(candidate);
+            foundCityZip = true;
+            break;
+          }
+          // Continuation street line (second line of a multi-line address)
+          if (!foundCityZip && (STREET_SUFFIX_RE.test(candidate) || NUMBERED_STREET_RE.test(candidate))) {
+            parts.push(candidate);
+            continue;
+          }
+          // If no better match, stop scanning
+          break;
         }
-      } else if (CITY_STATE_ZIP_RE.test(next1)) {
-        parts.push(next1);
-      } else if (PO_BOX_RE.test(next1)) {
-        // P.O. Box follows the street line — include it and look for city/state/ZIP
-        parts.push(next1);
-        if (CITY_STATE_ZIP_RE.test(next2)) {
-          parts.push(next2);
-        } else if (CITY_STATE_ZIP_RE.test(next3)) {
-          parts.push(next2); // intermediate line between P.O. Box and city/state/ZIP
-          parts.push(next3); // city/state/ZIP
-        }
-      } else if (next1 && ZIP_RE.test(next1) && !CITY_STATE_ZIP_RE.test(next1)) {
-        // ZIP-only on next line (rare) — just include it
-        parts.push(next1);
-      } else if (next1 && CITY_STATE_ZIP_RE.test(next2)) {
-        // next1 is a continued address line (e.g. second street line)
-        parts.push(next1);
-        parts.push(next2);
       }
 
       address = parts.join('\n');
     } else {
       // No street suffix found — fall back to city/state/ZIP line alone
       for (let i = 0; i < lines.length; i++) {
-        if (CITY_STATE_ZIP_RE.test(lines[i])) {
+        if (looksLikeCityStateZip(lines[i])) {
           address = lines[i];
           break;
         }
@@ -862,6 +926,27 @@ export function resolveFromRawText(rawText: string): Partial<ResolvedCard> {
         // Skip pure placeholder label lines (e.g. "COMPANY", "EMAIL")
         const normalized = line.replace(/[®™]/g, '').trim();
         if (isPlaceholder(normalized)) continue;
+
+        // Fix 2: Skip all-caps lines that score more strongly as a person name
+        // than as an organization (e.g. "DR. JOHN SMITH" or single-word names
+        // that match the email local-part via honorific check).
+        const personScore = scorePersonNameCandidate(normalized);
+        const orgScore = scoreOrganizationCandidate(normalized);
+        const emailLocalPart = emails[0] ? emails[0].split('@')[0] : '';
+        const emailOverlap = emailLocalPart
+          ? (() => {
+              const emailNorm = emailLocalPart.toLowerCase().replace(/[^a-z]/g, '');
+              const nameParts = normalized.toLowerCase().replace(/[^a-z ]/g, '').split(/\s+/).filter(Boolean);
+              return emailNorm.length >= 3 && nameParts.some(
+                (p) => p.length >= 3 && (emailNorm.startsWith(p) || p.startsWith(emailNorm) || emailNorm.includes(p)),
+              );
+            })()
+          : false;
+        if ((hasHonorific(normalized) || emailOverlap) && personScore > orgScore && !looksLikeDomain(normalized.toLowerCase())) {
+          // This all-caps line is likely a person name — skip it for company collection
+          break;
+        }
+
         stackedCaps.push(normalized);
         companyEndIndex = i;
       } else if (stackedCaps.length > 0) {
@@ -979,15 +1064,22 @@ export function resolveFromRawText(rawText: string): Partial<ResolvedCard> {
   if (nameCandidates.length > 0) {
     nameCandidates.sort((a, b) => b.score - a.score);
     const best = nameCandidates[0];
-    // Only accept a candidate when its confidence is sufficient.
-    // score >= 5  → firstName: 0.85, lastName: 0.80 (above the 0.75 threshold — accepted)
-    // score 1–4  → firstName: 0.70, lastName: 0.65 (below the 0.75 threshold — rejected)
-    if (best.score >= 5) {
+    // Fix 3: Lowered acceptance threshold from 5 to 3.
+    // score >= 3  → accepted with normal confidence
+    // score 1–2  → use as low-confidence fallback (reviewReasons gets 'low_confidence_name_fallback')
+    // When no candidate clears even 1, fall back to the highest-scoring regardless of score.
+    if (best.score >= 3) {
       fullName = best.credParsed.name;
       credentials = best.credParsed.credentials.join(', ');
       nameLineIndex = best.index;
+    } else {
+      // Low-confidence fallback: accept the best candidate anyway so the field is not blank.
+      fullName = best.credParsed.name;
+      credentials = best.credParsed.credentials.join(', ');
+      nameLineIndex = best.index;
+      // 'low_confidence_name_fallback' is added to reviewReasons below (step 12).
     }
-    // If we had candidates but none were credible enough, no_credible_name is added below.
+    // If we had candidates but all had score < 0, no_credible_name is added below.
   }
 
   // Derived tagline: first tagline line, or first service-description line
@@ -1001,6 +1093,13 @@ export function resolveFromRawText(rawText: string): Partial<ResolvedCard> {
   const nameParts = fullName.trim().split(/\s+/).filter(Boolean);
   const firstName = nameParts[0] ?? '';
   const lastName = nameParts.slice(1).join(' ');
+
+  // Fix 4: Detect middle name when exactly 3 name parts are present.
+  // Middle part must be alphabetic only (no digits) to qualify.
+  let middleName: string | undefined;
+  if (nameParts.length === 3 && /^[A-Za-z.'-]+$/.test(nameParts[1])) {
+    middleName = nameParts[1];
+  }
 
   // ── 8. Find title and subtitle (lines immediately after name) ────────────
   let title = credentials; // credentials go into title if not a separate field
@@ -1102,12 +1201,14 @@ export function resolveFromRawText(rawText: string): Partial<ResolvedCard> {
   }
 
   // If person-name slot contains an organization-like value, move it to company.
+  // Fix 5: require orgScore > personScore + 2 (margin of 2) to avoid reclassifying
+  // edge cases like "Grace Health" where one word is a service word.
   if (cleanFullName) {
     const personScore = scorePersonNameCandidate(cleanFullName);
     const orgScore = scoreOrganizationCandidate(cleanFullName);
     const companyStrength = scoreOrganizationCandidate(cleanCompany);
 
-    if (orgScore > personScore && companyStrength < orgScore) {
+    if (orgScore > personScore + 2 && companyStrength < orgScore) {
       if (!cleanCompany || companyStrength < orgScore) {
         cleanCompany = cleanFullName;
       }
@@ -1161,14 +1262,16 @@ export function resolveFromRawText(rawText: string): Partial<ResolvedCard> {
 
   if (cleanFullName) {
     const bestScore = nameCandidates.length > 0 ? nameCandidates[0].score : 0;
-    // Since we now only accept candidates with score >= 5, bestScore will be >= 5 here.
     if (bestScore >= 10) {
       fieldConfidence.firstName = 0.95;
       fieldConfidence.lastName  = 0.90;
-    } else {
-      // score >= 5 (the minimum accepted)
+    } else if (bestScore >= 3) {
       fieldConfidence.firstName = 0.85;
       fieldConfidence.lastName  = 0.80;
+    } else {
+      // Fix 3: Low-confidence fallback — accepted but low confidence scores
+      fieldConfidence.firstName = 0.60;
+      fieldConfidence.lastName  = 0.55;
     }
   }
 
@@ -1186,9 +1289,12 @@ export function resolveFromRawText(rawText: string): Partial<ResolvedCard> {
 
   if (!cleanFullName && !cleanCompany) reviewReasons.push('no_name_or_company');
   if (!cleanFullName && cleanCompany) reviewReasons.push('no_person_name');
-  // no_credible_name: name candidates were found but all scored below the acceptance threshold (< 5).
-  // This is distinct from no_name_or_company/no_person_name where no candidates existed at all.
+  // no_credible_name: name candidates were found but all had negative score.
   if (!cleanFullName && nameCandidates.length > 0) reviewReasons.push('no_credible_name');
+  // Fix 3: low_confidence_name_fallback when best score was below 3
+  if (cleanFullName && nameCandidates.length > 0 && nameCandidates[0].score < 3) {
+    reviewReasons.push('low_confidence_name_fallback');
+  }
   // Use 0 as default so absent confidence (no name/company found) correctly triggers the flag.
   if (cleanFullName && (fieldConfidence.firstName ?? 0) < 0.65) reviewReasons.push('low_confidence_name');
   if (cleanCompany && (fieldConfidence.company ?? 0) < 0.60) reviewReasons.push('low_confidence_company');
@@ -1201,10 +1307,20 @@ export function resolveFromRawText(rawText: string): Partial<ResolvedCard> {
 
   const needsReview = reviewReasons.length > 0;
 
+  // Fix 13: Capture secondary emails into extraFields
+  const secondaryEmails: Record<string, string> = {};
+  if (emails.length > 1) {
+    emails.slice(1).forEach((e, i) => {
+      secondaryEmails[i === 0 ? 'secondaryEmail' : `secondaryEmail${i + 1}`] = e;
+    });
+  }
+
   return {
     fullName: cleanFullName,
     firstName: cleanFirstName,
     lastName: cleanLastName,
+    // Fix 4: include middleName when detected
+    ...(middleName !== undefined && { middleName }),
     credentials,
     company: cleanCompany,
     ...(department !== undefined && { department }),
@@ -1221,7 +1337,9 @@ export function resolveFromRawText(rawText: string): Partial<ResolvedCard> {
     email: cleanEmail,
     website: cleanWebsiteVal,
     address: cleanAddress,
-    extraFields: {},
+    // Fix 17: Include social handle/URL if detected
+    ...(socialUrl ? { social: socialUrl } : {}),
+    extraFields: { ...secondaryEmails },
     warnings,
     fieldConfidence,
     overallConfidence,

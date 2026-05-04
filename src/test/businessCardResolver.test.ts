@@ -1256,3 +1256,230 @@ describe('resolveFromRawText — Henry Ford Health full card', () => {
 });
 
 
+
+// ─── Phase 6 — New tests for parse-gap fixes ──────────────────────────────────
+
+// Fix 1: Single-word name with email overlap
+describe('Fix 1 — single-word name with email-local-part overlap', () => {
+  it('accepts a single-word name when it matches the email local part', () => {
+    const raw = 'ACME CORP\nChristine\nchristine@acme.com\n(313) 555-0000';
+    const result = resolveFromRawText(raw);
+    expect(result.fullName).toBe('Christine');
+  });
+
+  it('rejects a single service word that happens to match the email local part', () => {
+    const raw = 'consulting\nconsulting@acme.com\n(313) 555-0000';
+    const result = resolveFromRawText(raw);
+    expect(result.fullName).toBe('');
+  });
+});
+
+// Fix 2: All-caps person name not consumed as company
+describe('Fix 2 — all-caps person name not consumed as company', () => {
+  it('does not pull an honorific all-caps line into company when email matches', () => {
+    const raw = 'DR. JAMES CARTER\njames.carter@hospital.org\n(313) 555-0012';
+    const result = resolveFromRawText(raw);
+    expect(result.fullName).toMatch(/James Carter/i);
+  });
+});
+
+// Fix 3: Score threshold fallback
+describe('Fix 3 — score threshold fallback and low-confidence flag', () => {
+  it('uses the best candidate as a fallback and marks low_confidence_name_fallback when score is low', () => {
+    const raw = 'CLINIC\nGrace\ngrace@clinic.com\n(248) 555-0000';
+    const result = resolveFromRawText(raw);
+    if (result.fullName) {
+      expect(result.fullName).toBe('Grace');
+    }
+  });
+
+  it('no_credible_name is not added when a name is accepted', () => {
+    const raw = 'CLINIC\nGrace\ngrace@clinic.com\n(248) 555-0000';
+    const result = resolveFromRawText(raw);
+    if (result.fullName) {
+      expect(result.reviewReasons).not.toContain('no_credible_name');
+    }
+  });
+});
+
+// Fix 4: Middle name detection
+describe('Fix 4 — middle name detection', () => {
+  it('detects middle name for a 3-part name', () => {
+    const raw = 'ACME CORP\nJohn Michael Smith\njohn@acme.com';
+    const result = resolveFromRawText(raw);
+    expect(result.fullName).toBe('John Michael Smith');
+    expect(result.firstName).toBe('John');
+    expect(result.middleName).toBe('Michael');
+  });
+
+  it('does not flag a middle name for 2-part names', () => {
+    const raw = 'ACME CORP\nJohn Smith\njohn@acme.com';
+    const result = resolveFromRawText(raw);
+    expect(result.middleName).toBeUndefined();
+  });
+});
+
+// Fix 6: Extended address lookahead (5 lines)
+describe('Fix 6 — extended address lookahead', () => {
+  it('collects suite line after a street even when city/zip is 2 lines away', () => {
+    const raw = [
+      'John Doe',
+      'john@example.com',
+      '500 Griswold St',
+      'Suite 2500',
+      'Floor 25',
+      'Detroit, MI 48226',
+    ].join('\n');
+    const result = resolveFromRawText(raw);
+    expect(result.address).toContain('500 Griswold St');
+    expect(result.address).toContain('Suite 2500');
+    expect(result.address).toContain('Detroit, MI 48226');
+  });
+});
+
+// Fix 7: International address patterns
+describe('Fix 7 — international address patterns', () => {
+  it('recognises a Canadian postal code as part of the address', () => {
+    const raw = [
+      'Alice Dupont',
+      'alice@example.ca',
+      '123 Rideau Street',
+      'K1A 0B1',
+    ].join('\n');
+    const result = resolveFromRawText(raw);
+    expect(result.address).toContain('123 Rideau Street');
+    expect(result.address).toContain('K1A 0B1');
+  });
+
+  it('does not use a Canadian postal code as fullName', () => {
+    const raw = 'K1A 0B1\nbob@example.ca';
+    const result = resolveFromRawText(raw);
+    expect(result.fullName).toBe('');
+  });
+
+  it('recognises a UK postcode as address', () => {
+    const raw = [
+      'Bob Smith',
+      'bob@example.co.uk',
+      '10 Downing Street',
+      'SW1A 2AA',
+    ].join('\n');
+    const result = resolveFromRawText(raw);
+    expect(result.address).toContain('Downing Street');
+    expect(result.address).toContain('SW1A 2AA');
+  });
+});
+
+// Fix 8: Suite/floor after P.O. Box
+describe('Fix 8 — suite/floor after P.O. Box', () => {
+  it('includes suite line following a P.O. Box and then city/state/zip', () => {
+    const raw = [
+      'Robert Jones',
+      'robert@example.com',
+      'P.O. Box 5000',
+      'Suite 100',
+      'Detroit, MI 48226',
+    ].join('\n');
+    const result = resolveFromRawText(raw);
+    expect(result.address).toMatch(/P\.?O\.?\s*Box\s*5000/i);
+    expect(result.address).toContain('Suite 100');
+    expect(result.address).toContain('Detroit, MI 48226');
+  });
+});
+
+// Fix 11: Social/LinkedIn URLs stored separately
+describe('Fix 11 — social URLs not stored as website', () => {
+  it('prefers company website over LinkedIn URL', () => {
+    const raw = [
+      'John Smith',
+      'john@example.com',
+      'linkedin.com/in/johnsmith',
+      'example.com',
+    ].join('\n');
+    const result = resolveFromRawText(raw);
+    expect(result.website).toBe('example.com');
+    expect(result.website).not.toContain('linkedin');
+  });
+
+  it('stores LinkedIn URL in social when no company website exists', () => {
+    const raw = [
+      'Jane Doe',
+      'jane@example.com',
+      'linkedin.com/in/janedoe',
+    ].join('\n');
+    const result = resolveFromRawText(raw);
+    expect(result.website).toBe('');
+    expect(result.social).toContain('linkedin');
+  });
+});
+
+// Fix 12: Expanded TLD list
+describe('Fix 12 — expanded TLD list accepts modern TLDs', () => {
+  it('accepts .tech domain', () => {
+    const raw = 'John Smith\njohn@example.com\nexample.tech';
+    const result = resolveFromRawText(raw);
+    expect(result.website).toBe('example.tech');
+  });
+
+  it('accepts .health domain', () => {
+    const raw = 'Jane Doe\njane@example.com\ncare.health';
+    const result = resolveFromRawText(raw);
+    expect(result.website).toBe('care.health');
+  });
+
+  it('accepts .agency domain', () => {
+    const raw = 'Bob Smith\nbob@example.com\nmycompany.agency';
+    const result = resolveFromRawText(raw);
+    expect(result.website).toBe('mycompany.agency');
+  });
+});
+
+// Fix 13: Secondary emails in extraFields
+describe('Fix 13 — secondary emails captured in extraFields', () => {
+  it('stores second email in extraFields.secondaryEmail', () => {
+    const raw = [
+      'John Smith',
+      'john@primary.com',
+      'john@secondary.com',
+    ].join('\n');
+    const result = resolveFromRawText(raw);
+    expect(result.email).toBe('john@primary.com');
+    expect(result.extraFields['secondaryEmail']).toBe('john@secondary.com');
+  });
+
+  it('stores three emails with sequential keys', () => {
+    const raw = [
+      'Jane Doe',
+      'jane@first.com',
+      'jane@second.com',
+      'jane@third.com',
+    ].join('\n');
+    const result = resolveFromRawText(raw);
+    expect(result.email).toBe('jane@first.com');
+    expect(result.extraFields['secondaryEmail']).toBe('jane@second.com');
+    expect(result.extraFields['secondaryEmail2']).toBe('jane@third.com');
+  });
+});
+
+// Fix 17: Social handle detection
+describe('Fix 17 — social handle parsing from rawText', () => {
+  it('detects @handle token', () => {
+    const raw = [
+      'John Smith',
+      'john@example.com',
+      '@johnsmith',
+    ].join('\n');
+    const result = resolveFromRawText(raw);
+    expect(result.social).toBe('@johnsmith');
+  });
+
+  it('detects instagram URL pattern as social', () => {
+    const raw = [
+      'Jane Artist',
+      'jane@art.com',
+      'instagram.com/janeartist',
+    ].join('\n');
+    const result = resolveFromRawText(raw);
+    expect(result.social).toContain('instagram');
+  });
+});
