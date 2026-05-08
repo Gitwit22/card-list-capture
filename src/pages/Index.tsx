@@ -42,7 +42,7 @@ const Index = () => {
 
     try {
       const extracted = await extractFromImage(file, docType);
-      setData(extracted);
+      setData(extracted.entries);
       setStep('review');
       toast.info('Data extracted — please review and correct any errors before exporting.');
     } catch {
