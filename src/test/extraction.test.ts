@@ -129,6 +129,34 @@ describe('extraction', () => {
       expect(result.meta.confidence).toBe(0.9);
     });
 
+    it('tries alternate sign-up/sign-in process endpoints before generic fallback', async () => {
+      const mockResponse = {
+        status: 'complete',
+        structure: 'table',
+        detectedHeaders: ['Name', 'Organization', 'Email', 'Phone'],
+        headerMapping: [],
+        rows: [
+          { id: '1', fullName: 'Casey Nguyen', organization: 'WCNS', email: 'casey@wcns.org', phone: '313-555-0100' },
+        ],
+        confidence: 0.82,
+      };
+
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce({ ok: false, status: 404, json: () => Promise.resolve({}) })
+        .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve(mockResponse) });
+
+      vi.stubGlobal('fetch', fetchMock);
+
+      const file = new File(['test'], 'sheet.pdf', { type: 'application/pdf' });
+      const result = await extractFromImage(file, 'signup-sheet');
+
+      expect(result.entries).toHaveLength(1);
+      expect(result.entries[0].fullName).toBe('Casey Nguyen');
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(fetchMock.mock.calls[0][0]).toBe('https://mock.api/process/signup-sheet');
+      expect(fetchMock.mock.calls[1][0]).toBe('https://mock.api/process/signin-sheet');
+    });
+
     it('maps business card response with extraFields', async () => {
       const mockResponse = {
         status: 'complete',
