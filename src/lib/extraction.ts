@@ -100,20 +100,24 @@ export async function extractFromImage(
       : { entries: [createEmptySignupEntry(), createEmptySignupEntry(), createEmptySignupEntry()], meta: emptyMeta() };
   }
 
-  const formData = new FormData();
-  formData.append('file', file);
+  const processPaths = docType === 'business-card'
+    ? ['/process/business-card']
+    : ['/process/signup-sheet', '/process/signin-sheet'];
 
-  const processPath = docType === 'business-card'
-    ? '/process/business-card'
-    : '/process/signin-sheet';
+  for (const processPath of processPaths) {
+    const formData = new FormData();
+    formData.append('file', file);
 
-  const processRes = await fetch(`${DOC_INTEL_URL}${processPath}`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${DOC_INTEL_TOKEN}` },
-    body: formData,
-  });
+    const processRes = await fetch(`${DOC_INTEL_URL}${processPath}`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${DOC_INTEL_TOKEN}` },
+      body: formData,
+    });
 
-  if (processRes.ok) {
+    if (!processRes.ok) {
+      continue;
+    }
+
     if (docType === 'business-card') {
       const result: BusinessCardProcessResponse = await processRes.json();
       logExtractionDebug('business-card', result);
