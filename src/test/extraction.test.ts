@@ -157,6 +157,38 @@ describe('extraction', () => {
       expect(fetchMock.mock.calls[1][0]).toBe('https://mock.api/process/signin-sheet');
     });
 
+    it('falls back to /extract when both sign-up/sign-in process endpoints fail', async () => {
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce({ ok: false, status: 404, json: () => Promise.resolve({}) })
+        .mockResolvedValueOnce({ ok: false, status: 404, json: () => Promise.resolve({}) })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: () => Promise.resolve({
+            status: 'complete',
+            fields: [
+              { key: 'fullName', value: 'Morgan Tate' },
+              { key: 'organization', value: 'NLSM' },
+              { key: 'email', value: 'morgan@nlsm.org' },
+            ],
+          }),
+        });
+
+      vi.stubGlobal('fetch', fetchMock);
+
+      const file = new File(['test'], 'sheet-fallback.pdf', { type: 'application/pdf' });
+      const result = await extractFromImage(file, 'signup-sheet');
+
+      expect(result.entries).toHaveLength(1);
+      const row = result.entries[0] as any;
+      expect(row.fullName).toBe('Morgan Tate');
+      expect(row.organization).toBe('NLSM');
+      expect(row.email).toBe('morgan@nlsm.org');
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+      expect(fetchMock.mock.calls[0][0]).toBe('https://mock.api/process/signup-sheet');
+      expect(fetchMock.mock.calls[1][0]).toBe('https://mock.api/process/signin-sheet');
+      expect(fetchMock.mock.calls[2][0]).toBe('https://mock.api/extract');
+    });
+
     it('maps business card response with extraFields', async () => {
       const mockResponse = {
         status: 'complete',
