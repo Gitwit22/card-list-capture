@@ -103,10 +103,11 @@ export async function extractFromImage(
   const processPaths = docType === 'business-card'
     ? ['/process/business-card']
     : ['/process/signup-sheet', '/process/signin-sheet'];
-  const formData = new FormData();
-  formData.append('file', file);
 
   for (const processPath of processPaths) {
+    const formData = new FormData();
+    formData.append('file', file);
+
     const processRes = await fetch(`${DOC_INTEL_URL}${processPath}`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${DOC_INTEL_TOKEN}` },
