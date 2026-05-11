@@ -55,6 +55,17 @@ const CANONICAL_TO_DYNAMIC_LABEL: Record<SignupCanonicalKey, string> = {
   comments: 'Comments',
 };
 
+const CANONICAL_LABEL_ALIASES: Record<SignupCanonicalKey, string[]> = {
+  fullName: ['name', 'fullname', 'attendee', 'participant', 'person', 'contact', 'firstname', 'lastname'],
+  organization: ['organization', 'org', 'company', 'agency', 'business'],
+  phone: ['phone', 'phonenumber', 'mobile', 'cell', 'telephone', 'tel', 'number'],
+  email: ['email', 'emailaddress', 'mail'],
+  screening: ['screening', 'screened', 'waiver'],
+  shareInfo: ['shareinfo', 'shareinformation', 'sharecontact', 'consent', 'optin'],
+  date: ['date', 'signdate', 'signupdate', 'timestamp'],
+  comments: ['comment', 'comments', 'notes', 'remarks', 'message'],
+};
+
 function normalizeKey(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]/g, '');
 }
@@ -85,6 +96,18 @@ function readRawRows(meta?: ExtractionMeta): Array<Record<string, string>> {
   return meta.rawRows.map((row) => ({ ...row }));
 }
 
+function inferCanonicalKeyFromLabel(label: string): SignupCanonicalKey | null {
+  const normalizedLabel = normalizeKey(label);
+
+  for (const [canonicalKey, aliases] of Object.entries(CANONICAL_LABEL_ALIASES) as Array<[SignupCanonicalKey, string[]]>) {
+    if (aliases.some((alias) => normalizedLabel === normalizeKey(alias))) {
+      return canonicalKey;
+    }
+  }
+
+  return null;
+}
+
 function getDynamicColumns(meta: ExtractionMeta | undefined, entries: SignupEntry[]): ReviewColumn[] {
   const columns: ReviewColumn[] = [];
   const usedLabels = new Set<string>();
@@ -113,6 +136,21 @@ function getDynamicColumns(meta: ExtractionMeta | undefined, entries: SignupEntr
     usedLabels.add(normalized);
   };
 
+  const pushCanonicalColumn = (canonicalKey: SignupCanonicalKey) => {
+    const label = CANONICAL_TO_DYNAMIC_LABEL[canonicalKey];
+    const normalized = normalizeKey(label);
+    if (!normalized || usedLabels.has(normalized)) return;
+
+    columns.push({
+      key: `dynamic:${normalized}:${columns.length}`,
+      label,
+      sourceKey: label,
+      canonical: true,
+      canonicalKey,
+    });
+    usedLabels.add(normalized);
+  };
+
   (meta?.detectedHeaders ?? []).forEach(pushColumn);
 
   if (columns.length === 0) {
@@ -125,13 +163,23 @@ function getDynamicColumns(meta: ExtractionMeta | undefined, entries: SignupEntr
     });
   }
 
-  if (columns.length === 0) {
-    SIGNUP_CANONICAL_COLUMNS.forEach((column) => {
-      const hasValue = entries.some((entry) => String(entry[column.key] ?? '').trim().length > 0);
-      if (!hasValue) return;
-      pushColumn(CANONICAL_TO_DYNAMIC_LABEL[column.key]);
-    });
-  }
+  const representedCanonicalKeys = new Set<SignupCanonicalKey>();
+  columns.forEach((column) => {
+    if (column.canonical && column.canonicalKey) {
+      representedCanonicalKeys.add(column.canonicalKey);
+      return;
+    }
+
+    const inferred = inferCanonicalKeyFromLabel(column.label);
+    if (inferred) representedCanonicalKeys.add(inferred);
+  });
+
+  SIGNUP_CANONICAL_COLUMNS.forEach((column) => {
+    if (representedCanonicalKeys.has(column.key)) return;
+    const hasValue = entries.some((entry) => String(entry[column.key] ?? '').trim().length > 0);
+    if (!hasValue) return;
+    pushCanonicalColumn(column.key);
+  });
 
   if (columns.length === 0) {
     return SIGNUP_CANONICAL_COLUMNS.map((column, index) => ({
@@ -147,24 +195,9 @@ function getDynamicColumns(meta: ExtractionMeta | undefined, entries: SignupEntr
 }
 
 function getCanonicalValueByColumnLabel(entry: SignupEntry, label: string): string {
-  const normalizedLabel = normalizeKey(label);
-  const table: Array<[SignupCanonicalKey, string[]]> = [
-    ['fullName', ['name', 'fullname', 'attendee', 'participant', 'person', 'contact']],
-    ['organization', ['organization', 'org', 'company', 'agency', 'business']],
-    ['phone', ['phone', 'phonenumber', 'mobile', 'cell', 'telephone', 'tel']],
-    ['email', ['email', 'emailaddress', 'mail']],
-    ['screening', ['screening', 'screened', 'waiver']],
-    ['shareInfo', ['shareinfo', 'shareinformation', 'sharecontact', 'consent', 'optin']],
-    ['date', ['date', 'signdate', 'signupdate', 'timestamp']],
-    ['comments', ['comment', 'comments', 'notes', 'remarks', 'message']],
-  ];
-
-  for (const [canonicalKey, aliases] of table) {
-    if (!aliases.some((alias) => normalizedLabel === normalizeKey(alias))) continue;
-    return String(entry[canonicalKey] ?? '');
-  }
-
-  return '';
+  const canonicalKey = inferCanonicalKeyFromLabel(label);
+  if (!canonicalKey) return '';
+  return String(entry[canonicalKey] ?? '');
 }
 
 function buildRowsFromRawRows(rawRows: Array<Record<string, string>>, columns: ReviewColumn[]): ReviewRow[] {

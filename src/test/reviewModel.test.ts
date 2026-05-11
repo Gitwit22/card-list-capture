@@ -180,6 +180,45 @@ describe('reviewModel', () => {
     expect(model.rows[0].values[accessColumn!.key]).toBe('Y');
   });
 
+  it('appends populated canonical columns when detected headers are too narrow', () => {
+    const entries: SignupEntry[] = [
+      {
+        id: 'r1',
+        fullName: 'Lydia McCullang',
+        organization: '',
+        phone: '313-555-0101',
+        email: 'lydia@example.org',
+        screening: '',
+        shareInfo: '',
+        date: '',
+        comments: '',
+        extraFields: {},
+      },
+    ];
+
+    const model = buildSignupReviewModel(entries, {
+      structure: 'table',
+      detectedHeaders: ['firstName', 'lastName'],
+      headerMapping: [],
+      confidence: 0.86,
+    });
+
+    expect(model.columns.map((column) => column.label)).toEqual([
+      'firstName',
+      'lastName',
+      'Phone',
+      'Email',
+    ]);
+
+    const phoneColumn = model.columns.find((column) => column.label === 'Phone');
+    const emailColumn = model.columns.find((column) => column.label === 'Email');
+
+    expect(phoneColumn).toBeDefined();
+    expect(emailColumn).toBeDefined();
+    expect(model.rows[0].values[phoneColumn!.key]).toBe('313-555-0101');
+    expect(model.rows[0].values[emailColumn!.key]).toBe('lydia@example.org');
+  });
+
   it('falls back to canonical labels only when metadata is absent', () => {
     const entries: SignupEntry[] = [
       {

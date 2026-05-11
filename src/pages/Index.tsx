@@ -7,11 +7,19 @@ import { DataReview } from '@/components/DataReview';
 import { ScanHistory } from '@/components/ScanHistory';
 import { DocumentType, SignupEntry, BusinessCardEntry, ScanRecord } from '@/types/scan';
 import { extractFromImage } from '@/lib/extraction';
-import { exportToExcel } from '@/lib/export';
+import { exportData, type ExportFormat } from '@/lib/export';
 import { getScanHistory, saveScanRecord } from '@/lib/storage';
 import { toast } from 'sonner';
 
 type Step = 'home' | 'capture' | 'processing' | 'review' | 'history';
+
+const EXPORT_FORMAT_OPTIONS: Array<{ format: ExportFormat; label: string }> = [
+  { format: 'xlsx', label: 'Excel (.xlsx)' },
+  { format: 'csv', label: 'CSV (.csv)' },
+  { format: 'tsv', label: 'TSV (.tsv)' },
+  { format: 'json', label: 'JSON (.json)' },
+  { format: 'md', label: 'Markdown (.md)' },
+];
 
 const Index = () => {
   const navigate = useNavigate();
@@ -21,6 +29,7 @@ const Index = () => {
   const [imageUrl, setImageUrl] = useState<string>('');
   const [data, setData] = useState<(SignupEntry | BusinessCardEntry)[]>([]);
   const [history, setHistory] = useState<ScanRecord[]>([]);
+  const [exportFormat, setExportFormat] = useState<ExportFormat>('xlsx');
 
   useEffect(() => {
     setHistory(getScanHistory());
@@ -57,17 +66,21 @@ const Index = () => {
       return;
     }
 
+    const typedData = docType === 'signup-sheet'
+      ? (data as SignupEntry[])
+      : (data as BusinessCardEntry[]);
+
     const record: ScanRecord = {
       id: crypto.randomUUID(),
       type: docType,
       imageUrl,
-      data,
+      data: typedData,
       createdAt: new Date(),
     };
     saveScanRecord(record);
-    exportToExcel(data, docType);
+    exportData(data, docType, exportFormat);
     refreshHistory();
-    toast.success('Exported to Excel!');
+    toast.success(`Exported ${exportFormat.toUpperCase()} successfully!`);
     reset();
   };
 
@@ -76,6 +89,7 @@ const Index = () => {
     setImageFile(null);
     setImageUrl('');
     setData([]);
+    setExportFormat('xlsx');
   };
 
   return (
@@ -199,9 +213,29 @@ const Index = () => {
 
             <DataReview docType={docType} data={data} onChange={setData} />
 
+            <div className="space-y-2">
+              <p className="text-sm font-medium text-foreground">Export File Type</p>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                {EXPORT_FORMAT_OPTIONS.map(({ format, label }) => (
+                  <button
+                    key={format}
+                    type="button"
+                    onClick={() => setExportFormat(format)}
+                    className={`rounded-md border px-3 py-2 text-sm text-left transition-colors ${
+                      exportFormat === format
+                        ? 'border-primary bg-primary/10 text-foreground'
+                        : 'border-border bg-card text-muted-foreground hover:bg-secondary'
+                    }`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
             <Button onClick={handleExport} className="w-full scan-gradient scan-shadow h-12 text-primary-foreground font-medium">
               <Download className="w-5 h-5 mr-2" />
-              Export to Excel
+              Export Selected File Type
             </Button>
           </div>
         )}

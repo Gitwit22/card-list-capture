@@ -51,7 +51,7 @@ vi.mock('@/lib/storage', () => ({
 }));
 
 vi.mock('@/lib/export', () => ({
-  exportToExcel: vi.fn(),
+  exportData: vi.fn(),
 }));
 
 describe('Index upload flow', () => {
